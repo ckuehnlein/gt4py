@@ -178,26 +178,37 @@ def _to_jax_field(field):
 
 
 def _to_numpy_field(field):
-    """Materialise a Field on the NumPy array namespace; pass through non-Fields."""
+    """Materialise a Field on the NumPy array namespace; pass through non-Fields.
+
+    No-op when the underlying array is a JAX tracer (i.e. we're inside an
+    outer ``jax.jit`` trace): conversion to numpy is forbidden there and the
+    caller will receive the still-JAX field, which is what they need.
+    """
     if not isinstance(field, common.Field):
+        return field
+    if jax is not None and isinstance(field.ndarray, jax.core.Tracer):
         return field
     return common._field(np.asarray(field.ndarray), domain=field.domain)
 
 
 def _transpose(f, dims):
+    # Bypass common._field's singledispatch: under jax.jit tracing the
+    # transposed array is a JAX tracer which the dispatch is not registered
+    # for. Reconstruct via the concrete field class.
     @utils.tree_map
     def impl(f):
         xp = get_array_ns(f)
         arr = xp.transpose(f.ndarray, axes=[f.domain.dim_index(dim) for dim in dims])
         domain = common.Domain(*(f.domain[dim] for dim in dims))
-        return common._field(arr, domain=domain)
+        return type(f)(domain, arr)
 
     return impl(f)
 
 
 def _broadcast_to(f, domain):
+    # See note in _transpose about the singledispatch bypass.
     xp = get_array_ns(f)
-    return common._field(xp.broadcast_to(f.ndarray, domain.shape), domain=domain)
+    return type(f)(domain, xp.broadcast_to(f.ndarray, domain.shape))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -342,16 +353,37 @@ def field_operator_call(op: EmbeddedOperator[_R, _P], args: Any, kwargs: Any) ->
     else:
         # called from other field_operator or missing `out` argument
         domain = kwargs.pop("domain", None)
-        kwargs.pop("offset_provider", None)
-        if jax is not None:
-            # When JAX is available, jit the embedded operator so that an
-            # inline field_operator call inside a Python wrapper benefits from
-            # tracing/fusion. This is what makes ``jax.jit`` / ``jax.jvp`` /
-            # ``jax.vjp`` over a Python function that invokes a gt4py field
-            # operator do something useful.
-            res = jax.jit(op)(*args, **kwargs)
+        offset_provider = kwargs.pop("offset_provider", None)
+
+        # When called as a top-level program-like inline call, we are
+        # responsible for installing offset_provider and closure_column_range
+        # into the embedded context. When called from inside another
+        # field_operator the context is already valid and we add nothing.
+        new_context_kwargs: dict[str, Any] = {}
+        if not embedded_context.within_valid_context():
+            if offset_provider is not None:
+                new_context_kwargs["offset_provider"] = offset_provider
+            if domain is not None:
+                new_context_kwargs["closure_column_range"] = _get_vertical_range(
+                    utils.tree_map(common.domain)(domain)
+                )
+
+        def _run():
+            if jax is not None:
+                # When JAX is available, jit the embedded operator so that an
+                # inline field_operator call inside a Python wrapper benefits
+                # from tracing/fusion. This is what makes ``jax.jit`` /
+                # ``jax.jvp`` / ``jax.vjp`` over a Python function that
+                # invokes a gt4py field operator do something useful.
+                return jax.jit(op)(*args, **kwargs)
+            return op(*args, **kwargs)
+
+        if new_context_kwargs:
+            with embedded_context.update(**new_context_kwargs):
+                res = _run()
         else:
-            res = op(*args, **kwargs)
+            res = _run()
+
         if domain is not None:
             return _tuple_slice_field(res, common.domain(domain))  # type: ignore[return-value]
         return res

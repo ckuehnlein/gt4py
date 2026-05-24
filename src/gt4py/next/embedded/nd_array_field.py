@@ -1118,6 +1118,11 @@ if jnp:
 
     common._field.register(jnp.ndarray, JaxArrayField.from_array)
     common._connectivity.register(jnp.ndarray, JaxArrayConnectivityField.from_array)
+    # Under jax.jit, jnp arrays are replaced by Tracer subclasses that don't
+    # match `jnp.ndarray`. Register the Tracer base so embedded code paths
+    # going through `common._field(...)` continue to work inside traced
+    # computations.
+    common._field.register(jax.core.Tracer, JaxArrayField.from_array)
 
     def _flatten(v: JaxArrayField):
         return (v.ndarray,), v.domain
