@@ -86,7 +86,10 @@ def _make_builtin(
                     )
                     transformed.append(xp.asarray(f_broadcasted.ndarray[f_slices]))
             else:
-                assert core_defs.is_scalar_type(f)
+                # Under jax.jit tracing f can be a JAX tracer or 0-dim jnp
+                # array, neither of which passes core_defs.is_scalar_type but
+                # both of which the array-namespace builtins accept.
+                # assert core_defs.is_scalar_type(f)
                 transformed.append(f)
         if reverse:
             transformed.reverse()

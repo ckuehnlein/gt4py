@@ -270,9 +270,10 @@ def min_over(field: common.Field, /, axis: common.Dimension) -> common.Field:
 def broadcast(
     field: common.Field | core_defs.ScalarT, dims: tuple[common.Dimension, ...], /
 ) -> common.Field:
-    assert core_defs.is_scalar_type(
-        field
-    )  # default implementation for scalars, Fields are handled via dispatch
+    # Under jax.jit tracing the value can be a JAX tracer or a 0-dim jnp
+    # array, neither of which passes core_defs.is_scalar_type; both broadcast
+    # automatically in the array namespace, so falling through is safe.
+    # assert core_defs.is_scalar_type(field)  # default implementation for scalars, Fields are handled via dispatch
     # TODO(havogt) implement with FunctionField, the workaround is to ignore broadcasting on scalars as they broadcast automatically, but we lose the check for compatible dimensions
     return field  # type: ignore[return-value] # see comment above
 

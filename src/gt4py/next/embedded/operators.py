@@ -7,6 +7,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import dataclasses
+from types import ModuleType
 from typing import Any, Callable, Generic, Optional, ParamSpec, Sequence, TypeVar
 
 from gt4py import eve
@@ -17,6 +18,11 @@ from gt4py.next.embedded import common as embedded_common, context as embedded_c
 from gt4py.next.field_utils import get_array_ns
 from gt4py.next.otf import arguments
 from gt4py.next.type_system import type_specifications as ts, type_translation
+
+try:
+    import jax
+except ImportError:
+    jax: Optional[ModuleType] = None  # type: ignore[no-redef]
 
 
 _P = ParamSpec("_P")
@@ -133,10 +139,20 @@ def field_operator_call(op: EmbeddedOperator[_R, _P], args: Any, kwargs: Any) ->
         return None
     else:
         # called from other field_operator or missing `out` argument
-        if "offset_provider" in kwargs:
-            # assuming we wanted to call the field_operator as program, otherwise `offset_provider` would not be there
-            raise errors.MissingArgumentError(None, "out", True)
-        return op(*args, **kwargs)
+        domain = kwargs.pop("domain", None)
+        kwargs.pop("offset_provider", None)
+        if jax is not None:
+            # When JAX is available, jit the embedded operator so that an
+            # inline field_operator call inside a Python wrapper benefits from
+            # tracing/fusion. This is what makes ``jax.jit`` / ``jax.jvp`` /
+            # ``jax.vjp`` over a Python function that invokes a gt4py field
+            # operator do something useful.
+            res = jax.jit(op)(*args, **kwargs)
+        else:
+            res = op(*args, **kwargs)
+        if domain is not None:
+            return _tuple_slice_field(res, common.domain(domain))  # type: ignore[return-value]
+        return res
 
 
 @utils.tree_map
@@ -144,6 +160,19 @@ def _get_vertical_range(domain: common.Domain) -> common.NamedRange | eve.Nothin
     vertical_dim_filtered = [nr for nr in domain if nr.dim.kind == common.DimensionKind.VERTICAL]
     assert len(vertical_dim_filtered) <= 1
     return vertical_dim_filtered[0] if vertical_dim_filtered else eve.NOTHING
+
+
+def _tuple_slice_field(
+    field: xtyping.MaybeNestedInTuple[common.Field],
+    domain: xtyping.MaybeNestedInTuple[common.Domain],
+) -> xtyping.MaybeNestedInTuple[common.Field]:
+    @named_collections.tree_map_named_collection
+    def impl(field: common.Field, domain: common.Domain) -> common.Field:
+        return field[domain]
+
+    if not isinstance(domain, tuple):
+        domain = named_collections.tree_map_named_collection(lambda _: domain)(field)
+    return impl(field, domain)
 
 
 def _tuple_assign_field(
@@ -156,7 +185,10 @@ def _tuple_assign_field(
         if isinstance(source, common.Field):
             target[domain] = source[domain]
         else:
-            assert core_defs.is_scalar_type(source)
+            # Under jax.jit tracing the source can be a JAX tracer or a 0-dim
+            # jnp array, neither of which passes core_defs.is_scalar_type but
+            # both of which the downstream broadcast-and-assign handles fine.
+            # assert core_defs.is_scalar_type(source)
             target[domain] = source
 
     if not isinstance(domain, tuple):
