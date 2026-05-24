@@ -285,6 +285,11 @@ def where(
     false_field: common.Field | core_defs.ScalarT | Tuple | named_collections.CustomNamedCollection,
     /,
 ) -> common.Field | Tuple:
+    # Scalar fast path: needed when ``where`` is invoked inside a vectorized
+    # scan body where mask/branches are already reduced to scalars (or 0-dim
+    # arrays under jax tracing).
+    if all(core_defs.is_scalar_type(f) for f in [mask, true_field, false_field]):
+        return true_field if mask else false_field
     raise NotImplementedError()
 
 
@@ -355,9 +360,13 @@ def _make_unary_math_builtin(name: str) -> BuiltInFunction:
 
     def impl(value: common.Field | core_defs.ScalarT, /) -> common.Field | core_defs.ScalarT:
         # TODO(havogt): enable tests in `test_math_builtin_execution.py`
-        assert core_defs.is_scalar_type(
-            value
-        )  # default implementation for scalars, Fields are handled via dispatch
+        # Under jax.jit tracing the value can be a JAX tracer or a 0-dim jnp
+        # array, neither of which passes core_defs.is_scalar_type but both
+        # of which the underlying math builtin (or its jnp equivalent via
+        # dispatch) handles correctly.
+        # assert core_defs.is_scalar_type(
+        #     value
+        # )  # default implementation for scalars, Fields are handled via dispatch
 
         return cast(common.Field | core_defs.ScalarT, _math_builtin(value))  # type: ignore[operator, arg-type] # calling a function of unknown type; trunc not supported for all types
 

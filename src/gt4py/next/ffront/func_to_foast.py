@@ -73,9 +73,14 @@ def func_to_foast(inp: DSLFieldOperatorDef) -> FOASTOperatorDef:
     annotations = typing.get_type_hints(inp.definition)
     foast_definition_node = FieldOperatorParser.apply(source_def, closure_vars, annotations)
     loc = foast_definition_node.location
+    # Only attributes that the AST node class declares as fields become AST
+    # Constant children; the rest stay in ``inp.attributes`` for runtime use
+    # by the embedded execution path (e.g. scan strategy selection).
+    ast_fields = set(inp.node_class.__datamodel_fields__.keys())
     operator_attribute_nodes = {
         key: foast.Constant(value=value, type=type_translation.from_value(value), location=loc)
         for key, value in inp.attributes.items()
+        if key in ast_fields
     }
     untyped_foast_node = inp.node_class(
         id=foast_definition_node.id,

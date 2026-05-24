@@ -683,9 +683,16 @@ class FieldOperator(_CompilableGTEntryPointMixin[ffront_stages.DSLFieldOperatorD
                 forward = attributes["forward"]
                 init = attributes["init"]
                 axis = attributes["axis"]
-                op: embedded_operators.EmbeddedOperator = embedded_operators.ScanOperator(
-                    self.definition_stage.definition, forward, init, axis
-                )
+                if attributes.get("vectorized", False):
+                    op: embedded_operators.EmbeddedOperator = (
+                        embedded_operators.ScanOperatorVectorized(
+                            self.definition_stage.definition, forward, init, axis
+                        )
+                    )
+                else:
+                    op = embedded_operators.ScanOperator(
+                        self.definition_stage.definition, forward, init, axis
+                    )
             else:
                 op = embedded_operators.EmbeddedOperator(self.definition_stage.definition)
             return embedded_operators.field_operator_call(op, args, kwargs)
@@ -819,6 +826,7 @@ def scan_operator(
     init: core_defs.Scalar = 0.0,
     backend: next_backend.Backend | None | eve.NothingType = eve.NOTHING,
     grid_type: common.GridType | None = None,
+    vectorized: bool = False,
 ) -> FieldOperator | Callable[[Callable], FieldOperator]:
     """
     Generate an implementation of the scan operator from a Python function object.
@@ -858,7 +866,12 @@ def scan_operator(
             ),
             grid_type,
             operator_node_cls=foast.ScanOperator,
-            operator_attributes={"axis": axis, "forward": forward, "init": init},
+            operator_attributes={
+                "axis": axis,
+                "forward": forward,
+                "init": init,
+                "vectorized": vectorized,
+            },
         )
 
     return scan_operator_inner if definition is None else scan_operator_inner(definition)
