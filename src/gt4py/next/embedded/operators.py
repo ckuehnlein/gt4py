@@ -10,6 +10,8 @@ import dataclasses
 from types import ModuleType
 from typing import Any, Callable, Generic, Optional, ParamSpec, Sequence, TypeVar
 
+import numpy as np
+
 from gt4py import eve
 from gt4py._core import definitions as core_defs
 from gt4py.eve import extended_typing as xtyping
@@ -161,6 +163,137 @@ class ScanOperatorVectorized(
         scan_loop()
 
         return res
+
+
+def _to_jax_field(field):
+    """Materialise a Field on the JAX array namespace; pass through non-Fields."""
+    from gt4py.next.embedded import nd_array_field
+
+    if not isinstance(field, common.Field) or isinstance(field, nd_array_field.JaxArrayField):
+        return field
+    assert isinstance(field, nd_array_field.NumPyArrayField), (
+        f"_to_jax_field: unsupported field type {type(field).__name__}"
+    )
+    return common._field(jax.numpy.asarray(field.ndarray), domain=field.domain)
+
+
+def _to_numpy_field(field):
+    """Materialise a Field on the NumPy array namespace; pass through non-Fields."""
+    if not isinstance(field, common.Field):
+        return field
+    return common._field(np.asarray(field.ndarray), domain=field.domain)
+
+
+def _transpose(f, dims):
+    @utils.tree_map
+    def impl(f):
+        xp = get_array_ns(f)
+        arr = xp.transpose(f.ndarray, axes=[f.domain.dim_index(dim) for dim in dims])
+        domain = common.Domain(*(f.domain[dim] for dim in dims))
+        return common._field(arr, domain=domain)
+
+    return impl(f)
+
+
+def _broadcast_to(f, domain):
+    xp = get_array_ns(f)
+    return common._field(xp.broadcast_to(f.ndarray, domain.shape), domain=domain)
+
+
+@dataclasses.dataclass(frozen=True)
+class ScanOperatorJax(EmbeddedOperator[xtyping.MaybeNestedInTuple[core_defs.ScalarT], _P]):
+    """Scan operator emitting a single ``jax.lax.scan``.
+
+    The scan body is traced once and compiled into a rolled XLA loop, rather
+    than unrolled across the K range. Compile-time cost is independent of
+    NLEV; runtime is one fused kernel.
+    """
+
+    forward: bool
+    init: xtyping.MaybeNestedInTuple[core_defs.ScalarT]
+    axis: common.Dimension
+
+    def __call__(  # type: ignore[override]
+        self,
+        *args: common.Field | core_defs.Scalar,
+        **kwargs: common.Field | core_defs.Scalar,
+    ) -> (
+        common.Field[Any, core_defs.ScalarT]
+        | tuple[common.Field[Any, core_defs.ScalarT] | tuple, ...]
+    ):
+        if jax is None:
+            raise RuntimeError("ScanOperatorJax requires jax to be installed.")
+        from jax import lax, numpy as jnp
+
+        scan_range = embedded_context.get_closure_column_range()
+        assert self.axis == scan_range.dim
+        scan_axis = scan_range.dim
+
+        args = [_to_jax_field(arg) for arg in args]
+        kwargs = {k: _to_jax_field(v) for k, v in kwargs.items()}
+
+        all_args = [*args, *kwargs.values()]
+        domain_intersection = _intersect_scan_args(*all_args)
+        non_scan_domain = common.Domain(*[nr for nr in domain_intersection if nr.dim != scan_axis])
+
+        out_domain = common.Domain(
+            *[scan_range if nr.dim == scan_axis else nr for nr in domain_intersection]
+        )
+        if scan_axis not in out_domain.dims:
+            # even if the scan dimension is not in the input, we can scan over it
+            out_domain = common.Domain(*out_domain, (scan_range))
+
+        init_type = type_translation.from_value(self.init)
+        assert isinstance(init_type, ts.TupleType | ts.ScalarType | ts.NamedCollectionType)
+
+        from gt4py.next.embedded import nd_array_field
+
+        def jax_fun(carry, x):
+            # lax.scan presents one slice per step with the scan axis dropped.
+            # The pytree unflatten reattaches the *full* domain to the sliced
+            # ndarray; we rebuild the field with the trailing domain. Use the
+            # direct constructor since common._field's singledispatch is not
+            # registered for JAX tracers.
+            x = utils.tree_map(
+                lambda f: nd_array_field.JaxArrayField(f.domain[1:], f.ndarray)
+            )(x)
+            res = self.fun(carry, *x)
+            return (res, res)
+
+        def make_field(f):
+            return nd_array_field.JaxArrayField(common.domain(out_domain), jnp.full(out_domain.shape, f))
+
+        def scan_loop():
+            new_dims = (scan_axis, *non_scan_domain.dims)
+            new_args_seq = tuple(
+                make_field(arg) if not isinstance(arg, common.Field) else arg for arg in args
+            )
+            new_args_seq = tuple(
+                _transpose(
+                    _broadcast_to(
+                        fbuiltins.broadcast(arg[scan_range], (*non_scan_domain.dims, scan_axis)),
+                        out_domain,
+                    ),
+                    new_dims,
+                )
+                for arg in new_args_seq
+            )
+            assert len(kwargs) == 0, "ScanOperatorJax does not yet support kwargs"
+
+            init = field_utils.field_from_typespec(init_type, non_scan_domain, jnp)
+            _tuple_assign_field(target=init, source=self.init, domain=non_scan_domain)
+            res = lax.scan(jax_fun, init, new_args_seq, reverse=not self.forward)
+            res = res[1]
+            res = utils.tree_map(
+                lambda f: nd_array_field.JaxArrayField(
+                    common.Domain(scan_range, *f.domain), f.ndarray
+                )
+            )(res)
+            res = _transpose(res, out_domain.dims)
+            return res
+
+        res = scan_loop()
+        return utils.tree_map(lambda a: _to_numpy_field(a))(res)
 
 
 def _get_out_domain(out: xtyping.MaybeNestedInTuple[common.MutableField]) -> common.Domain:

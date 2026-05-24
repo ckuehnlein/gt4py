@@ -683,15 +683,23 @@ class FieldOperator(_CompilableGTEntryPointMixin[ffront_stages.DSLFieldOperatorD
                 forward = attributes["forward"]
                 init = attributes["init"]
                 axis = attributes["axis"]
-                if attributes.get("vectorized", False):
-                    op: embedded_operators.EmbeddedOperator = (
-                        embedded_operators.ScanOperatorVectorized(
-                            self.definition_stage.definition, forward, init, axis
-                        )
+                strategy = attributes.get("strategy")
+                if strategy is None:
+                    op: embedded_operators.EmbeddedOperator = embedded_operators.ScanOperator(
+                        self.definition_stage.definition, forward, init, axis
+                    )
+                elif strategy == "vectorized":
+                    op = embedded_operators.ScanOperatorVectorized(
+                        self.definition_stage.definition, forward, init, axis
+                    )
+                elif strategy == "jax":
+                    op = embedded_operators.ScanOperatorJax(
+                        self.definition_stage.definition, forward, init, axis
                     )
                 else:
-                    op = embedded_operators.ScanOperator(
-                        self.definition_stage.definition, forward, init, axis
+                    raise ValueError(
+                        f"Unknown scan_operator strategy {strategy!r}; "
+                        "expected one of None, 'vectorized', 'jax'."
                     )
             else:
                 op = embedded_operators.EmbeddedOperator(self.definition_stage.definition)
@@ -826,7 +834,7 @@ def scan_operator(
     init: core_defs.Scalar = 0.0,
     backend: next_backend.Backend | None | eve.NothingType = eve.NOTHING,
     grid_type: common.GridType | None = None,
-    vectorized: bool = False,
+    strategy: str | None = None,
 ) -> FieldOperator | Callable[[Callable], FieldOperator]:
     """
     Generate an implementation of the scan operator from a Python function object.
@@ -870,7 +878,7 @@ def scan_operator(
                 "axis": axis,
                 "forward": forward,
                 "init": init,
-                "vectorized": vectorized,
+                "strategy": strategy,
             },
         )
 
