@@ -280,7 +280,7 @@ def broadcast(
 
 @WhereBuiltinFunction
 def where(
-    mask: common.Field,
+    mask: common.Field | core_defs.ScalarT,
     true_field: common.Field | core_defs.ScalarT | Tuple | named_collections.CustomNamedCollection,
     false_field: common.Field | core_defs.ScalarT | Tuple | named_collections.CustomNamedCollection,
     /,
