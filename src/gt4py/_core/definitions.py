@@ -356,7 +356,16 @@ DTypeLike = Union[DType, npt.DTypeLike]
 
 def dtype(dtype_like: DTypeLike) -> DType:
     """Return the DType corresponding to the given dtype-like object."""
-    return dtype_like if isinstance(dtype_like, DType) else DType(np.dtype(dtype_like).type)
+    if isinstance(dtype_like, DType):
+        return dtype_like
+    # PyTorch dtype objects (e.g. ``torch.float64``) are not numpy-dtype-like.
+    # Detect them by class identity (no torch import required here) and map
+    # to numpy via the canonical string name (``"torch.float64"`` -> ``"float64"``).
+    tp = type(dtype_like)
+    if tp.__module__ == "torch" and tp.__name__ == "dtype":
+        np_name = str(dtype_like).rsplit(".", 1)[-1]
+        return DType(np.dtype(np_name).type)
+    return DType(np.dtype(dtype_like).type)
 
 
 # -- Custom protocols  --

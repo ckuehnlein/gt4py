@@ -50,6 +50,11 @@ except ImportError:
     jnp: Optional[ModuleType] = None  # type: ignore[no-redef]
 
 try:
+    import torch
+except ImportError:
+    torch: Optional[ModuleType] = None  # type: ignore[no-redef]
+
+try:
     import dace
 except ImportError:
     dace: Optional[ModuleType] = None  # type: ignore[no-redef]
@@ -1131,6 +1136,103 @@ if jnp:
         return JaxArrayField(aux_data, children[0])
 
     jax.tree_util.register_pytree_node(JaxArrayField, _flatten, _unflatten)
+
+
+# PyTorch
+if torch:
+    _nd_array_implementations.append(torch)
+
+    # numpy <-> torch dtype bridge used by TorchTensorField.from_array.
+    # torch.float64 etc. are torch.dtype objects with no ``.type`` attribute,
+    # so the NdArrayField.from_array fallback that calls ``xp.dtype(scalar_type)``
+    # and ``array.dtype.type`` doesn't apply.
+    _NP_TO_TORCH_DTYPE = {
+        np.bool_: torch.bool,
+        np.int8: torch.int8,
+        np.int16: torch.int16,
+        np.int32: torch.int32,
+        np.int64: torch.int64,
+        np.uint8: torch.uint8,
+        np.float16: torch.float16,
+        np.float32: torch.float32,
+        np.float64: torch.float64,
+    }
+
+    @dataclasses.dataclass(frozen=True, eq=False)
+    class TorchTensorField(NdArrayField):
+        array_ns: ClassVar[ModuleType] = torch
+
+        @property
+        def __gt_buffer_info__(self) -> common.BufferInfo:
+            raise NotImplementedError(
+                "'__gt_buffer_info__' for TorchTensorField not yet implemented."
+            )
+
+        # torch tensors are mutable in eager mode, so the parent
+        # NdArrayField.__setitem__ (which does self._ndarray[slice] = value)
+        # works as-is. Unlike JAX, no functional-update override is needed.
+
+        @classmethod
+        def from_array(
+            cls,
+            data,
+            /,
+            *,
+            domain: common.DomainLike,
+            dtype: Optional[core_defs.DTypeLike] = None,
+        ) -> "TorchTensorField":
+            # Specialised from_array because torch.dtype is not a constructor
+            # like np.dtype, and torch.Tensor.dtype has no `.type` attribute.
+            domain = common.domain(domain)
+            if dtype is not None:
+                np_scalar = core_defs.dtype(dtype).scalar_type
+                torch_dtype = _NP_TO_TORCH_DTYPE[np_scalar]
+                tensor = torch.asarray(data, dtype=torch_dtype)
+            else:
+                tensor = torch.asarray(data)
+                # Validate the resulting dtype maps to a gt4py-supported scalar.
+                np_scalar = next(
+                    (k for k, v in _NP_TO_TORCH_DTYPE.items() if v == tensor.dtype),
+                    None,
+                )
+                if np_scalar is None:
+                    raise TypeError(
+                        f"torch dtype {tensor.dtype!r} has no gt4py scalar mapping"
+                    )
+            assert issubclass(np_scalar, core_defs.SCALAR_TYPES)
+            assert all(isinstance(d, common.Dimension) for d in domain.dims), domain
+            assert len(domain) == tensor.ndim
+            assert all(s == 1 or len(r) == s for r, s in zip(domain.ranges, tensor.shape))
+            return cls(domain, tensor)
+
+    @dataclasses.dataclass(frozen=True, eq=False)
+    class TorchTensorConnectivityField(NdArrayConnectivityField):
+        array_ns: ClassVar[ModuleType] = torch
+
+    common._field.register(torch.Tensor, TorchTensorField.from_array)
+    common._connectivity.register(torch.Tensor, TorchTensorConnectivityField.from_array)
+    # FakeTensor, GradTrackingTensor, BatchedTensor etc. (used by torch.compile,
+    # torch.func.{jvp,vjp}) are all subclasses of torch.Tensor, so the registration
+    # above covers them via MRO. No separate registration needed (unlike JAX
+    # where jax.core.Tracer is not a subclass of jnp.ndarray).
+
+    # NOTE: PyTorch's unflatten callback receives (leaves, context) — the
+    # opposite order from JAX's (aux_data, children). Easy footgun when
+    # mirror-copying from the JAX block; keep this order explicit.
+    import torch.utils._pytree as _torch_pytree
+
+    def _torch_flatten(v: TorchTensorField):
+        return (v.ndarray,), v.domain
+
+    def _torch_unflatten(children, context):
+        return TorchTensorField(context, children[0])
+
+    _torch_pytree.register_pytree_node(
+        TorchTensorField,
+        _torch_flatten,
+        _torch_unflatten,
+        serialized_type_name="gt4py.next.embedded.nd_array_field.TorchTensorField",
+    )
 
 
 def _broadcast(field: common.Field, new_dimensions: Sequence[common.Dimension]) -> common.Field:
