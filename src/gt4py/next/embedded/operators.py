@@ -27,6 +27,11 @@ try:
 except ImportError:
     jax: Optional[ModuleType] = None  # type: ignore[no-redef]
 
+try:
+    import torch
+except ImportError:
+    torch: Optional[ModuleType] = None  # type: ignore[no-redef]
+
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -368,14 +373,27 @@ def field_operator_call(op: EmbeddedOperator[_R, _P], args: Any, kwargs: Any) ->
                     utils.tree_map(common.domain)(domain)
                 )
 
+        # Decide which array namespace the inline call should use. The choice
+        # is determined by the input fields' array_ns, not by what's importable
+        # — this lets JAX and torch coexist in the same gt4py install with the
+        # cloudsc2 driver pinning the namespace per call.
+        input_ns = get_array_ns(*(arguments.extract(a) for a in args))
+
         def _run():
-            if jax is not None:
-                # When JAX is available, jit the embedded operator so that an
-                # inline field_operator call inside a Python wrapper benefits
-                # from tracing/fusion. This is what makes ``jax.jit`` /
-                # ``jax.jvp`` / ``jax.vjp`` over a Python function that
-                # invokes a gt4py field operator do something useful.
+            if jax is not None and jax.numpy is input_ns:
+                # JAX inputs: jit the embedded operator so an inline
+                # field_operator call inside a Python wrapper benefits from
+                # tracing/fusion. Makes ``jax.jit`` / ``jax.jvp`` / ``jax.vjp``
+                # over a wrapper that invokes a gt4py field operator do
+                # something useful.
                 return jax.jit(op)(*args, **kwargs)
+            if torch is not None and torch is input_ns:
+                # Torch inputs: run eagerly. ``torch.autograd`` / ``torch.func``
+                # traverse the Python loop natively; we don't need ``torch.compile``
+                # for correctness. The TorchCompileBackend (Phase E) is the
+                # opt-in performance path.
+                return op(*args, **kwargs)
+            # Plain NumPy or any other namespace: run eagerly.
             return op(*args, **kwargs)
 
         if new_context_kwargs:
