@@ -191,7 +191,12 @@ class NdArrayField(
 
     @functools.cached_property
     def dtype(self) -> core_defs.DType[core_defs.ScalarT]:
-        return core_defs.dtype(self._ndarray.dtype.type)
+        # Pass the dtype object itself to core_defs.dtype() rather than its
+        # ``.type`` attribute: torch.dtype has no .type, but core_defs.dtype
+        # accepts both numpy dtype objects (np.dtype, jnp.dtype, cp.dtype —
+        # all .type-equivalent) and torch.dtype (via the class-identity
+        # branch added for the torch path).
+        return core_defs.dtype(self._ndarray.dtype)
 
     @property
     def ndarray(self) -> core_defs.NDArrayObject:
