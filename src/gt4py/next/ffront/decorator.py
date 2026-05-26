@@ -696,10 +696,19 @@ class FieldOperator(_CompilableGTEntryPointMixin[ffront_stages.DSLFieldOperatorD
                     op = embedded_operators.ScanOperatorJax(
                         self.definition_stage.definition, forward, init, axis
                     )
+                elif strategy == "torch":
+                    # PyTorch eager scan = the vectorized Python-loop variant.
+                    # torch.autograd / torch.func.{jvp,vjp} traverse the loop
+                    # natively; no lax.scan analog needed (and
+                    # torch._higher_order_ops.scan is autodiff-incompatible
+                    # under torch.func — see docs/pytorch-embedded-plan.md).
+                    op = embedded_operators.ScanOperatorTorch(
+                        self.definition_stage.definition, forward, init, axis
+                    )
                 else:
                     raise ValueError(
                         f"Unknown scan_operator strategy {strategy!r}; "
-                        "expected one of None, 'vectorized', 'jax'."
+                        "expected one of None, 'vectorized', 'jax', 'torch'."
                     )
             else:
                 op = embedded_operators.EmbeddedOperator(self.definition_stage.definition)

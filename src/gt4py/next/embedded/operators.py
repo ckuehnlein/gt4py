@@ -312,6 +312,20 @@ class ScanOperatorJax(EmbeddedOperator[xtyping.MaybeNestedInTuple[core_defs.Scal
         return utils.tree_map(lambda a: _to_numpy_field(a))(res)
 
 
+# PyTorch eager scan: the body iterates the K range with a Python for-loop,
+# horizontal slice per K. Functionally identical to ScanOperatorVectorized;
+# the alias exists so ``strategy="torch"`` reads naturally and we have a
+# documented hook point for future torch-specific variants (e.g. wrapping
+# the loop in ``torch.compile``).
+#
+# torch.autograd / torch.func.{jvp,vjp} traverse the Python loop natively;
+# no torch.lax.scan equivalent is needed. ``torch._higher_order_ops.scan``
+# does exist (PyTorch >= 2.5) but is forward-only — it fails under
+# torch.func.{jvp,vjp} with a TorchDynamo functorch-unwrap error. See
+# docs/pytorch-embedded-plan.md for details.
+ScanOperatorTorch = ScanOperatorVectorized
+
+
 def _get_out_domain(out: xtyping.MaybeNestedInTuple[common.MutableField]) -> common.Domain:
     return embedded_common.domain_intersection(
         *[f.domain for f in utils.flatten_nested_tuple((out,))]
