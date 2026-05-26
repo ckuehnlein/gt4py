@@ -67,13 +67,34 @@ def _get_nd_array_class(*fields: common.Field | core_defs.Scalar) -> type[NdArra
     raise AssertionError("No 'NdArrayField' found in the arguments.")
 
 
+# Some numpy builtins have different names in torch, or torch's
+# numpy-named variant has different semantics. Map by namespace at
+# operation lookup time. Torch entries:
+#   * ``power``     -> ``pow``         (no ``torch.power``)
+#   * ``mod``       -> ``remainder``   (no ``torch.mod``)
+#   * ``invert``    -> ``bitwise_not`` (no ``torch.invert``)
+#   * ``equal``     -> ``eq``          (``torch.equal`` is a scalar
+#                                       whole-array test, not elementwise)
+#   * ``not_equal`` -> ``ne``          (same reason)
+_TORCH_BUILTIN_RENAME = {
+    "power": "pow",
+    "mod": "remainder",
+    "invert": "bitwise_not",
+    "equal": "eq",
+    "not_equal": "ne",
+}
+
+
 def _make_builtin(
     builtin_name: str, array_builtin_name: str, reverse: bool = False
 ) -> Callable[..., NdArrayField]:
     def _builtin_op(*fields: common.Field | core_defs.Scalar) -> NdArrayField:
         cls_ = _get_nd_array_class(*fields)
         xp = cls_.array_ns
-        op = getattr(xp, array_builtin_name)
+        op_name = array_builtin_name
+        if torch is not None and xp is torch:
+            op_name = _TORCH_BUILTIN_RENAME.get(op_name, op_name)
+        op = getattr(xp, op_name)
 
         domain_intersection = embedded_common.domain_intersection(
             *[f.domain for f in fields if isinstance(f, common.Field)]
@@ -95,7 +116,32 @@ def _make_builtin(
                 # array, neither of which passes core_defs.is_scalar_type but
                 # both of which the array-namespace builtins accept.
                 # assert core_defs.is_scalar_type(f)
-                transformed.append(f)
+                #
+                # PyTorch is stricter than numpy / jax.numpy: builtins like
+                # ``torch.maximum`` reject Python scalars and require both
+                # args to be tensors. Coerce to a 0-dim tensor before the
+                # call. Crucially, match the dtype of the existing field
+                # args — otherwise ``torch.asarray(1e-12)`` returns a float32
+                # because torch's default dtype is float32, which silently
+                # downcasts the computation. The mixed-promotion rules
+                # then propagate the lost precision (e.g. 1e-12 -> ~1e-12
+                # at float32 precision).
+                if torch is not None and xp is torch and not isinstance(f, torch.Tensor):
+                    target_dtype = None
+                    for prior_f in fields:
+                        if isinstance(prior_f, common.Field) and hasattr(
+                            prior_f.ndarray, "dtype"
+                        ):
+                            dt = prior_f.ndarray.dtype
+                            if dt.is_floating_point:
+                                target_dtype = dt
+                                break
+                    if target_dtype is not None:
+                        transformed.append(xp.asarray(f, dtype=target_dtype))
+                    else:
+                        transformed.append(xp.asarray(f))
+                else:
+                    transformed.append(f)
         if reverse:
             transformed.reverse()
         new_data = op(*transformed)
