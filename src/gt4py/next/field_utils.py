@@ -21,6 +21,24 @@ try:
 except ImportError:
     cp = None
 
+try:
+    import torch
+except ImportError:
+    torch = None
+
+
+def _xp_dtype(xp: ModuleType, np_scalar_type: type):
+    """Map a numpy scalar dtype to the matching dtype of the array namespace ``xp``.
+
+    Needed because ``torch.dtype`` is not a constructor like ``np.dtype`` /
+    ``jnp.dtype`` / ``cp.dtype`` and ``torch.float64(...)`` does not exist.
+    """
+    if torch is not None and xp is torch:
+        # Map numpy scalar dtype to torch dtype via the canonical name.
+        # np.float64 -> "float64" -> torch.float64.
+        return getattr(torch, np.dtype(np_scalar_type).name)
+    return xp.dtype(np_scalar_type)
+
 
 @utils.tree_map
 def asnumpy(field: common.Field | np.ndarray) -> np.ndarray:
@@ -66,8 +84,9 @@ def field_from_typespec(
         result_collection_constructor=_constructor,
     )
     def impl(type_: ts.ScalarType) -> common.MutableField:
+        np_scalar = type_translation.as_dtype(type_).scalar_type
         res = common._field(
-            xp.empty(domain.shape, dtype=xp.dtype(type_translation.as_dtype(type_).scalar_type)),
+            xp.empty(domain.shape, dtype=_xp_dtype(xp, np_scalar)),
             domain=domain,
         )
         assert isinstance(res, common.MutableField)
