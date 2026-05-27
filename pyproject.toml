@@ -155,6 +155,9 @@ jax = [
 jax-cuda12 = ['jax[cuda12-local]>=0.6.0', 'gt4py[cuda12]']
 jax-cuda13 = ['jax[cuda13-local]>=0.7.0; python_version >= "3.11"', 'gt4py[cuda13]']  # jax 0.7 not supported with Python 3.10
 next = ['gt4py[jax,standard,testing]']
+torch = [
+  'torch>=2.4',  # minimum stable surface for torch.func.{jvp,vjp,grad} + torch.compile + pytree
+]
 rocm6 = ['cupy>=13.4.1,<14.0']
 rocm7 = ['cupy-rocm-7-0>=14.0']
 standard = [
