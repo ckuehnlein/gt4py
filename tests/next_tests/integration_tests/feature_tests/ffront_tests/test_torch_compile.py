@@ -25,10 +25,7 @@ import pytest
 import gt4py.next as gtx
 
 from next_tests.integration_tests import cases
-from next_tests.integration_tests.cases import IDim, Ioff
-from next_tests.integration_tests.feature_tests.ffront_tests.ffront_test_utils import (
-    simple_cartesian_grid,
-)
+from next_tests.integration_tests.cases import IDim, simple_cartesian_grid
 
 
 try:
@@ -88,7 +85,7 @@ def test_arithmetic(torch_cartesian_case):
 def test_cartesian_shift(torch_cartesian_case):
     @gtx.field_operator
     def testee(a: cases.IJKField) -> cases.IJKField:
-        return a(Ioff[1])
+        return a(IDim + 1)
 
     a = cases.allocate(torch_cartesian_case, testee, "a").extend({IDim: (0, 1)})()
     out = cases.allocate(torch_cartesian_case, testee, cases.RETURN)()
