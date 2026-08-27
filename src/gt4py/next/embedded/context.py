@@ -25,6 +25,7 @@ _closure_column_range: contextvars.ContextVar[common.NamedRange] = contextvars.C
 _offset_provider: contextvars.ContextVar[common.OffsetProvider] = contextvars.ContextVar(
     "_offset_provider"
 )
+_scan_strategy: contextvars.ContextVar[str | None] = contextvars.ContextVar("_scan_strategy")
 
 
 _T = TypeVar("_T")
@@ -69,21 +70,30 @@ def get_offset_provider(default: _T = _NO_DEFAULT_SENTINEL) -> common.OffsetProv
     return result
 
 
+def get_scan_strategy(default: _T = None) -> str | None | _T:
+    """Embedded scan-execution strategy selected in the current context, if any."""
+    return _scan_strategy.get(default)
+
+
 @contextlib.contextmanager
 def update(
     *,
     closure_column_range: common.NamedRange | eve.NothingType = eve.NOTHING,
     offset_provider: common.OffsetProvider | eve.NothingType = eve.NOTHING,
+    scan_strategy: str | None | eve.NothingType = eve.NOTHING,
 ) -> Generator[None, None, None]:
     """Context handler updating the current embedded context with the provided values."""
 
-    closure_token, offset_provider_token = None, None
+    closure_token, offset_provider_token, scan_strategy_token = None, None, None
     if closure_column_range is not eve.NOTHING:
         assert not isinstance(closure_column_range, eve.NothingType)
         closure_token = gtx_embedded.context._closure_column_range.set(closure_column_range)
     if offset_provider is not eve.NOTHING:
         assert not isinstance(offset_provider, eve.NothingType)
         offset_provider_token = gtx_embedded.context._offset_provider.set(offset_provider)
+    if scan_strategy is not eve.NOTHING:
+        assert not isinstance(scan_strategy, eve.NothingType)
+        scan_strategy_token = gtx_embedded.context._scan_strategy.set(scan_strategy)
 
     try:
         yield None
@@ -94,6 +104,21 @@ def update(
         if offset_provider is not eve.NOTHING:
             assert offset_provider_token is not None
             gtx_embedded.context._offset_provider.reset(offset_provider_token)
+        if scan_strategy is not eve.NOTHING:
+            assert scan_strategy_token is not None
+            gtx_embedded.context._scan_strategy.reset(scan_strategy_token)
+
+
+@contextlib.contextmanager
+def scan_strategy(name: str | None) -> Generator[None, None, None]:
+    """Select the embedded scan-execution strategy for calls inside the block.
+
+    Overrides any ``strategy=`` given at ``@scan_operator`` decoration
+    (deprecated). Only embedded execution consults this; compiled backends
+    (gtfn, dace, ...) ignore it.
+    """
+    with update(scan_strategy=name):
+        yield None
 
 
 def within_valid_context() -> bool:
