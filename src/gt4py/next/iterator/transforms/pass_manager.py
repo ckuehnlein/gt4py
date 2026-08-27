@@ -8,7 +8,7 @@
 import warnings
 from typing import Optional, Protocol
 
-from gt4py.next import common, utils
+from gt4py.next import common, config, utils
 from gt4py.next.iterator import ir as itir
 from gt4py.next.iterator.ir_utils import common_pattern_matcher as cpm, ir_makers as im
 from gt4py.next.iterator.transforms import (
@@ -186,6 +186,7 @@ def apply_common_transforms(
         ir,
         offset_provider=offset_provider,
         symbolic_domain_sizes=symbolic_domain_sizes,
+        allow_uninferred=config.ALLOW_UNINFERRED_DOMAIN,
     )
     ir = prune_empty_concat_where.prune_empty_concat_where(ir)
     ir = remove_broadcast.RemoveBroadcast.apply(ir)
@@ -305,6 +306,7 @@ def apply_fieldview_transforms(
         ir,
         symbolic_domain_sizes=symbolic_domain_sizes,
         offset_provider=offset_provider,
+        allow_uninferred=config.ALLOW_UNINFERRED_DOMAIN,
     )
     ir = prune_empty_concat_where.prune_empty_concat_where(ir)
     ir = remove_broadcast.RemoveBroadcast.apply(ir)

@@ -694,36 +694,38 @@ class FieldOperator(_CompilableGTEntryPointMixin[ffront_stages.DSLFieldOperatorD
                 forward = attributes["forward"]
                 init = attributes["init"]
                 axis = attributes["axis"]
-                strategy = attributes.get("strategy")
-                if strategy is None:
-                    op: embedded_operators.EmbeddedOperator = embedded_operators.ScanOperator(
-                        self.definition_stage.definition, forward, init, axis
-                    )
-                elif strategy == "vectorized":
-                    op = embedded_operators.ScanOperatorVectorized(
-                        self.definition_stage.definition, forward, init, axis
-                    )
-                elif strategy == "jax":
-                    op = embedded_operators.ScanOperatorJax(
-                        self.definition_stage.definition, forward, init, axis
-                    )
-                elif strategy == "torch":
-                    # PyTorch eager scan = the vectorized Python-loop variant.
-                    # torch.autograd / torch.func.{jvp,vjp} traverse the loop
-                    # natively; no lax.scan analog needed (and
-                    # torch._higher_order_ops.scan is autodiff-incompatible
-                    # under torch.func — see docs/pytorch-embedded-plan.md).
-                    op = embedded_operators.ScanOperatorTorch(
-                        self.definition_stage.definition, forward, init, axis
-                    )
-                else:
+                # Resolution order: embedded context > decorator kwarg
+                # (deprecated) > None. The context wins so an
+                # already-decorated scan_operator can be re-driven with a
+                # different embedded execution without editing its source.
+                strategy = next_embedded.context.get_scan_strategy(
+                    default=attributes.get("strategy")
+                )
+                try:
+                    scan_cls = _SCAN_STRATEGIES[strategy]
+                except KeyError:
                     raise ValueError(
-                        f"Unknown scan_operator strategy {strategy!r}; "
-                        "expected one of None, 'vectorized', 'jax', 'torch'."
-                    )
+                        f"Unknown scan strategy {strategy!r}; "
+                        f"expected one of {list(_SCAN_STRATEGIES)}."
+                    ) from None
+                op: embedded_operators.EmbeddedOperator = scan_cls(
+                    self.definition_stage.definition, forward, init, axis
+                )
             else:
                 op = embedded_operators.EmbeddedOperator(self.definition_stage.definition)
             return embedded_operators.field_operator_call(op, args, kwargs)
+
+
+#: Embedded scan-execution strategies, selectable per call via
+#: ``gt4py.next.embedded.context.scan_strategy(...)`` (or, deprecated, the
+#: ``strategy=`` kwarg of ``scan_operator``). Only embedded execution
+#: consults this table; compiled backends lower the scan themselves.
+_SCAN_STRATEGIES: dict[str | None, type[embedded_operators.EmbeddedOperator]] = {
+    None: embedded_operators.ScanOperator,
+    "vectorized": embedded_operators.ScanOperatorVectorized,
+    "jax": embedded_operators.ScanOperatorJax,
+    "torch": embedded_operators.ScanOperatorTorch,
+}
 
 
 GTEntryPoint: TypeAlias = Program | FieldOperator
