@@ -368,14 +368,21 @@ def field_operator_call(op: EmbeddedOperator[_R, _P], args: Any, kwargs: Any) ->
                     utils.tree_map(common.domain)(domain)
                 )
 
+        # Decide which array namespace the inline call should use. The choice
+        # is determined by the input fields' array_ns, not by what's importable
+        # — so JAX-backed and plain numpy fields can coexist in the same
+        # install, with the caller pinning the namespace per call.
+        input_ns = get_array_ns(*(arguments.extract(a) for a in args))
+
         def _run():
-            if jax is not None:
-                # When JAX is available, jit the embedded operator so that an
-                # inline field_operator call inside a Python wrapper benefits
+            if jax is not None and jax.numpy is input_ns:
+                # JAX inputs: jit the embedded operator so that an inline
+                # field_operator call inside a Python wrapper benefits
                 # from tracing/fusion. This is what makes ``jax.jit`` /
                 # ``jax.jvp`` / ``jax.vjp`` over a Python function that
                 # invokes a gt4py field operator do something useful.
                 return jax.jit(op)(*args, **kwargs)
+            # Plain NumPy or any other namespace: run eagerly.
             return op(*args, **kwargs)
 
         if new_context_kwargs:
