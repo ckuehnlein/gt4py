@@ -106,6 +106,16 @@ VERBOSE_EXCEPTIONS: bool = env_flag_to_bool(
 )
 
 
+#: Allow domain inference to tolerate 'as_fieldop' inputs whose domain cannot
+#: be inferred, e.g. scan arguments that become dead after constant folding of
+#: compile-time-disabled branches. By default such inputs raise an error in
+#: 'infer_domain.infer_program'. Workaround until dead scan inputs are pruned
+#: before domain inference upstream.
+ALLOW_UNINFERRED_DOMAIN: bool = env_flag_to_bool(
+    "GT4PY_ALLOW_UNINFERRED_DOMAIN", default=False
+)
+
+
 #: Where generated code projects should be persisted.
 #: Only active if BUILD_CACHE_LIFETIME is set to PERSISTENT
 BUILD_CACHE_DIR: pathlib.Path = (
