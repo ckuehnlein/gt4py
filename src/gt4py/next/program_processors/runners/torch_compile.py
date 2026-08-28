@@ -38,7 +38,17 @@ if torch:
         def _callable(*args, **kwargs):
             input_args = args[:-1]
             out = args[-1]
-            result_out = _pure_callable(input_args, out)
+            # The embedded machinery is not fully Dynamo-traceable: reads of
+            # contextvars (embedded_context) force graph breaks, and resuming
+            # a frame that holds gt4py's frozen metadata dataclasses (Domain,
+            # UnitRange) as locals fails with "can't reconstruct arbitrary
+            # frozen dataclass instances". With suppress_errors, Dynamo falls
+            # back to eager for exactly those frames and compiles the tensor
+            # compute in the rest — the intended semantics for this backend.
+            # Scoped via config.patch so the process-global default of user
+            # code outside this backend is untouched.
+            with torch._dynamo.config.patch(suppress_errors=True):
+                result_out = _pure_callable(input_args, out)
 
             # Copy the concrete result tensors back into the *original* output
             # fields so the caller sees the updated data. Mirrors the JAX
