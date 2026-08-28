@@ -30,6 +30,25 @@ _NON_CONTIGUOUS_DOMAIN_WARNING_THRESHOLD: float = 1 / 4
 _NON_CONTIGUOUS_DOMAIN_WARNING_SKIPPED_OFFSET_TAGS: set[str] = set()
 
 
+#: Memo for constant folding of symbolic range bounds. Domain inference calls
+#: ConstantFolding on the start/stop of every range union/intersection — per
+#: let-binding, per dimension — and the bound expressions (small min/max/plus
+#: trees over literals and symbols) repeat massively across a program, which
+#: made the folder the dominant cost of `infer_domain` on large programs.
+#: itir nodes hash and compare by content, so a plain dict keyed on the
+#: expression is sound; folded results are shared, which is safe because
+#: transformation passes rebuild nodes instead of mutating them.
+_constant_fold_cache: dict[itir.Expr, itir.Expr] = {}
+
+
+def _cached_constant_fold(expr: itir.Expr) -> itir.Expr:
+    try:
+        return _constant_fold_cache[expr]
+    except KeyError:
+        res = _constant_fold_cache[expr] = ConstantFolding.apply(expr)  # type: ignore[assignment,index]  # always an itir.Expr
+        return res
+
+
 @dataclasses.dataclass(frozen=True)
 class SymbolicRange:
     start: itir.Expr
@@ -45,8 +64,8 @@ class SymbolicRange:
 
     def empty(self) -> bool | None:
         # constant fold so that translated bounds like `0 + 1` are recognized as literals
-        start = ConstantFolding.apply(self.start)
-        stop = ConstantFolding.apply(self.stop)
+        start = _cached_constant_fold(self.start)
+        stop = _cached_constant_fold(self.stop)
         if isinstance(start, itir.Literal) and isinstance(stop, itir.Literal):
             return int(start.value) >= int(stop.value)
         elif start == stop:
@@ -261,7 +280,7 @@ def _reduce_ranges(
     stop = functools.reduce(stop_reduce_op, [range_.stop for range_ in ranges])
     # constant fold to keep the tree small and so translated bounds (e.g. `0 + 1`) collapse to a
     # literal (we deliberately do not fold in `translate`)
-    start, stop = ConstantFolding.apply(start), ConstantFolding.apply(stop)  # type: ignore[assignment]  # always an itir.Expr
+    start, stop = _cached_constant_fold(start), _cached_constant_fold(stop)
     return SymbolicRange(start, stop)
 
 
