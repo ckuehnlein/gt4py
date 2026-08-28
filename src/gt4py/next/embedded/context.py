@@ -121,5 +121,11 @@ def scan_strategy(name: str | None) -> Generator[None, None, None]:
         yield None
 
 
+# Module-level sentinel: allocating it per call (`object()`) breaks
+# TorchDynamo tracing of the embedded machinery under torch.compile
+# (bare `object` is an untraceable builtin, forcing a graph break).
+_WITHIN_VALID_CONTEXT_SENTINEL: Any = object()
+
+
 def within_valid_context() -> bool:
-    return _offset_provider.get(SENTINEL := object()) is not SENTINEL
+    return _offset_provider.get(_WITHIN_VALID_CONTEXT_SENTINEL) is not _WITHIN_VALID_CONTEXT_SENTINEL
