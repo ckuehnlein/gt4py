@@ -37,6 +37,66 @@ _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
 
+def _field_float_kind(args: Sequence[Any]) -> Optional[ts.ScalarKind]:
+    """Float precision carried by the field arguments of a scan call.
+
+    Returns FLOAT64 if any field holds 64-bit floats, FLOAT32 if the float
+    fields are all 32-bit, None if no float field is present. Nested tuple
+    arguments are walked recursively.
+    """
+    found32 = False
+
+    def visit(arg: Any) -> Optional[ts.ScalarKind]:
+        nonlocal found32
+        if isinstance(arg, tuple):
+            for a in arg:
+                if (kind := visit(a)) is not None:
+                    return kind
+            return None
+        if isinstance(arg, common.Field):
+            ndarray = arg.ndarray
+            if getattr(ndarray, "weak_type", False):
+                # JAX weak-typed arrays (built from Python scalars) don't pin
+                # the precision — they follow whatever they combine with.
+                return None
+            name = str(getattr(ndarray, "dtype", ""))
+            if name.endswith("float64"):
+                return ts.ScalarKind.FLOAT64
+            if name.endswith("float32"):
+                found32 = True
+        return None
+
+    for arg in args:
+        if (kind := visit(arg)) is not None:
+            return kind
+    return ts.ScalarKind.FLOAT32 if found32 else None
+
+
+def _weak_init_type(
+    init: xtyping.MaybeNestedInTuple[core_defs.ScalarT], args: Sequence[Any]
+) -> ts.TypeSpec:
+    """Type of the scan carry, with Python-float inits treated as weakly typed.
+
+    ``type_translation.from_value`` maps a plain Python float to float64, which
+    would silently upcast an otherwise float32 scan (the float64 carry wins
+    every promotion). In embedded execution the carry precision should follow
+    the data, so float64 scalars in the deduced init type are narrowed to
+    float32 when the field arguments are uniformly 32-bit.
+    """
+    init_type = type_translation.from_value(init)
+    if _field_float_kind(args) != ts.ScalarKind.FLOAT32:
+        return init_type
+
+    def narrow(t: ts.TypeSpec) -> ts.TypeSpec:
+        if isinstance(t, ts.ScalarType) and t.kind == ts.ScalarKind.FLOAT64:
+            return ts.ScalarType(kind=ts.ScalarKind.FLOAT32)
+        if isinstance(t, ts.TupleType):
+            return ts.TupleType(types=[narrow(x) for x in t.types])
+        return t
+
+    return narrow(init_type)
+
+
 @dataclasses.dataclass(frozen=True)
 class EmbeddedOperator(Generic[_R, _P]):
     fun: Callable[_P, _R]
@@ -74,7 +134,7 @@ class ScanOperator(EmbeddedOperator[xtyping.MaybeNestedInTuple[core_defs.ScalarT
             out_domain = common.Domain(*out_domain, (scan_range))
 
         xp = get_array_ns(*(arguments.extract(arg) for arg in all_args))
-        init_type = type_translation.from_value(self.init)
+        init_type = _weak_init_type(self.init, all_args)
         assert isinstance(init_type, ts.TupleType | ts.ScalarType | ts.NamedCollectionType)
         res = field_utils.field_from_typespec(init_type, out_domain, xp)
 
@@ -141,7 +201,7 @@ class ScanOperatorVectorized(
             out_domain = common.Domain(*out_domain, (scan_range))
 
         xp = get_array_ns(*(arguments.extract(arg) for arg in all_args))
-        init_type = type_translation.from_value(self.init)
+        init_type = _weak_init_type(self.init, all_args)
         assert isinstance(init_type, ts.TupleType | ts.ScalarType | ts.NamedCollectionType)
         res = field_utils.field_from_typespec(init_type, out_domain, xp)
 
@@ -259,7 +319,7 @@ class ScanOperatorJax(EmbeddedOperator[xtyping.MaybeNestedInTuple[core_defs.Scal
             # even if the scan dimension is not in the input, we can scan over it
             out_domain = common.Domain(*out_domain, (scan_range))
 
-        init_type = type_translation.from_value(self.init)
+        init_type = _weak_init_type(self.init, all_args)
         assert isinstance(init_type, ts.TupleType | ts.ScalarType | ts.NamedCollectionType)
 
         from gt4py.next.embedded import nd_array_field
