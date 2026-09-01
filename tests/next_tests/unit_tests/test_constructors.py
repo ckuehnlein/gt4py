@@ -209,7 +209,8 @@ def test_aligned_index():
     [([0, 1, 2], None), ([0, 1, common._DEFAULT_SKIP_VALUE], common._DEFAULT_SKIP_VALUE)],
 )
 def test_as_connectivity(nd_array_implementation, data, skip_value):
-    testee = gtx.as_connectivity([I], J, nd_array_implementation.array(data))
+    # `asarray` instead of `array`: torch has no `array` constructor
+    testee = gtx.as_connectivity([I], J, nd_array_implementation.asarray(data))
     assert testee.skip_value is skip_value
 
 

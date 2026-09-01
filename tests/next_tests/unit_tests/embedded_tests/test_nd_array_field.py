@@ -82,7 +82,9 @@ def _make_field_or_scalar(
         dtype = np.float32
     if isinstance(lst, core_defs.SCALAR_TYPES):
         return dtype(lst)
-    buffer = nd_array_implementation.asarray(lst, dtype=dtype)
+    # go through numpy for the dtype: not every namespace accepts numpy
+    # dtype classes in `asarray` (torch expects torch.dtype objects)
+    buffer = nd_array_implementation.asarray(np.asarray(lst, dtype=dtype))
     if domain is None:
         domain = _make_default_domain(buffer.shape)
     return common._field(buffer, domain=domain)
@@ -107,7 +109,7 @@ def are_equal_fields(a: Field, b: Field) -> bool:
 def test_nd_array_field_buffer_info(nd_array_implementation):
     import dataclasses
 
-    data = nd_array_implementation.asarray([[1.0, 2.0], [3.0, 4.0]], dtype=np.float64)
+    data = nd_array_implementation.asarray(np.asarray([[1.0, 2.0], [3.0, 4.0]], dtype=np.float64))
     field = constructors.as_field((D0, D1), data)
 
     field_ndarray = field.ndarray
@@ -288,7 +290,7 @@ def test_binary_operations_with_intersection(binary_arithmetic_op, dims, expecte
 
 def test_as_scalar(nd_array_implementation):
     testee = common._field(
-        nd_array_implementation.asarray(42.0, dtype=np.float32), domain=common.Domain()
+        nd_array_implementation.asarray(np.asarray(42.0, dtype=np.float32)), domain=common.Domain()
     )
 
     result = testee.as_scalar()

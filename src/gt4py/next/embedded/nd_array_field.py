@@ -174,6 +174,20 @@ def _get_builtin(xp: ModuleType, name: str) -> Callable:
             raise NotImplementedError(
                 f"'gamma' is not implemented for array namespace '{xp.__name__}'."
             )
+        case "where":
+            if torch is not None and xp is torch:
+                # torch.where requires a boolean condition; numpy/cupy/jax
+                # accept any dtype with nonzero-as-true semantics
+                return lambda cond, x, y: torch.where(
+                    cond.bool() if isinstance(cond, torch.Tensor) else cond, x, y
+                )
+            return getattr(xp, name)
+        case "cbrt":
+            if torch is not None and xp is torch:
+                # torch has no cbrt; sign(x) * |x|^(1/3) matches numpy's
+                # real-valued cube root for negative arguments
+                return lambda x: torch.sign(x) * torch.abs(x) ** (1.0 / 3.0)
+            return getattr(xp, name)
         case _:
             if torch is not None and xp is torch:
                 name = _TORCH_BUILTIN_RENAME.get(name, name)
@@ -954,8 +968,11 @@ def _invert_domain(domain: common.Domain) -> tuple[common.Domain, ...]:
 def _size0_field(
     nd_array_class: type[NdArrayField], dims: tuple[common.Dimension, ...], dtype: core_defs.DType
 ) -> NdArrayField:
+    from gt4py.next.field_utils import _xp_dtype  # local import: field_utils imports this module
+
+    xp = nd_array_class.array_ns
     return nd_array_class.from_array(
-        nd_array_class.array_ns.empty((0,) * len(dims), dtype=dtype.scalar_type),
+        xp.empty((0,) * len(dims), dtype=_xp_dtype(xp, dtype.scalar_type)),
         domain=common.Domain(dims=dims, ranges=(common.UnitRange(0, 0),) * len(dims)),
     )
 
