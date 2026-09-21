@@ -95,9 +95,14 @@ def _make_builtin(
         xp = cls_.array_ns
         op = _get_builtin(xp, array_builtin_name)
 
-        domain_intersection = embedded_common.domain_intersection(
-            *[f.domain for f in fields if isinstance(f, common.Field)]
-        )
+        # Fast path: operands on one and the same domain (the common case in
+        # embedded execution) need no intersection.
+        domains = [f.domain for f in fields if isinstance(f, common.Field)]
+        first = domains[0]
+        if all(d is first or d == first for d in domains[1:]):
+            domain_intersection = first
+        else:
+            domain_intersection = embedded_common.domain_intersection(*domains)
 
         transformed: list[core_defs.NDArrayObject | core_defs.Scalar] = []
         for f in fields:
@@ -127,23 +132,40 @@ def _make_builtin(
                 # at float32 precision).
                 if torch is not None and xp is torch and not isinstance(f, torch.Tensor):
                     target_dtype = None
+                    device = None
                     for prior_f in fields:
                         if isinstance(prior_f, common.Field) and hasattr(
                             prior_f.ndarray, "dtype"
                         ):
                             dt = prior_f.ndarray.dtype
+                            if device is None:
+                                device = prior_f.ndarray.device
                             if dt.is_floating_point:
                                 target_dtype = dt
                                 break
-                    if target_dtype is not None:
-                        transformed.append(xp.asarray(f, dtype=target_dtype))
-                    else:
-                        transformed.append(xp.asarray(f))
+                    # Same device as the field operands: a CPU 0-dim tensor
+                    # mixed with CUDA operands works for binary ops but not
+                    # for e.g. torch.where, and costs an H2D copy.
+                    # torch.full fills on the device; torch.asarray(scalar,
+                    # device=cuda) goes through a CPU tensor and an unpinned
+                    # H2D copy, which CUDA graph capture rejects.
+                    if target_dtype is None:
+                        target_dtype = torch.as_tensor(f).dtype
+                    transformed.append(torch.full((), f, dtype=target_dtype, device=device))
                 else:
                     transformed.append(f)
         if reverse:
             transformed.reverse()
         new_data = op(*transformed)
+        try:
+            shape = domain_intersection.shape
+        except ValueError:  # open (infinite) ranges: let from_array handle it
+            shape = None
+        if shape is not None and getattr(new_data, "shape", None) == shape:
+            # Trusted construction: domain and array are consistent by
+            # construction here; ``from_array`` re-validates dims, dtype
+            # and shape on every call (~30 us).
+            return cls_(domain_intersection, new_data)
         return cls_.from_array(new_data, domain=domain_intersection)
 
     _builtin_op.__name__ = builtin_name

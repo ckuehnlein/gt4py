@@ -8,6 +8,7 @@
 
 import contextlib
 from types import ModuleType
+from typing import Any, Optional
 
 import numpy as np
 
@@ -47,7 +48,10 @@ def asnumpy(field: common.Field | np.ndarray) -> np.ndarray:
 
 
 def field_from_typespec(
-    type_: ts.CollectionTypeSpec | ts.ScalarType, domain: common.Domain, xp: ModuleType
+    type_: ts.CollectionTypeSpec | ts.ScalarType,
+    domain: common.Domain,
+    xp: ModuleType,
+    device: Optional[Any] = None,
 ) -> common.MutableField | tuple[common.MutableField | tuple, ...]:
     """
     Allocate a field or (arbitrarily nested) tuple(s) of fields.
@@ -86,8 +90,11 @@ def field_from_typespec(
     )
     def impl(type_: ts.ScalarType) -> common.MutableField:
         np_scalar = type_translation.as_dtype(type_).scalar_type
+        # ``device``: torch allocates on its default device (CPU) unless told
+        # otherwise; callers pass the device of their inputs (see device_of).
+        kwargs = {"device": device} if device is not None else {}
         res = common._field(
-            xp.empty(domain.shape, dtype=_xp_dtype(xp, np_scalar)),
+            xp.empty(domain.shape, dtype=_xp_dtype(xp, np_scalar), **kwargs),
             domain=domain,
         )
         assert isinstance(res, common.MutableField)
@@ -103,6 +110,18 @@ def get_array_ns(
         if hasattr(arg, "array_ns"):
             return arg.array_ns
     return np
+
+
+def device_of(
+    *args: core_defs.Scalar | common.Field | tuple[core_defs.Scalar | common.Field | tuple, ...],
+) -> Optional[Any]:
+    """Torch device of the first torch-backed field among ``args`` (None otherwise)."""
+    if torch is not None:
+        for arg in utils.flatten_nested_tuple(args):
+            data = getattr(arg, "ndarray", None)
+            if isinstance(data, torch.Tensor):
+                return data.device
+    return None
 
 
 def device_context(
@@ -123,6 +142,11 @@ def device_context(
         for arg in utils.flatten_nested_tuple(args):
             data = getattr(arg, "ndarray", None)
             if isinstance(data, torch.Tensor):
+                if data.device.type == "cpu":
+                    # torch's default device is already the CPU; entering a
+                    # ``torch.device`` context would only add a
+                    # TorchFunctionMode interception to every torch call.
+                    return contextlib.nullcontext()
                 return torch.device(data.device)
     return contextlib.nullcontext()
 

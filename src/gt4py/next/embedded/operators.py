@@ -204,13 +204,12 @@ class ScanOperatorVectorized(
         init_type = _weak_init_type(self.init, all_args)
         assert isinstance(init_type, ts.TupleType | ts.ScalarType | ts.NamedCollectionType)
         # Allocate result / accumulator on the device of the inputs (torch).
-        device_ctx = field_utils.device_context(*all_args)
-        with device_ctx:
-            res = field_utils.field_from_typespec(init_type, out_domain, xp)
+        device = field_utils.device_of(*all_args)
+        res = field_utils.field_from_typespec(init_type, out_domain, xp, device)
 
         def scan_loop() -> None:
             acc: common.MutableField | tuple[common.MutableField | tuple, ...] = (
-                field_utils.field_from_typespec(init_type, non_scan_domain, xp)
+                field_utils.field_from_typespec(init_type, non_scan_domain, xp, device)
             )
             _tuple_assign_field(target=acc, source=self.init, domain=non_scan_domain)
             for k in scan_range.unit_range if self.forward else reversed(scan_range.unit_range):
@@ -228,8 +227,7 @@ class ScanOperatorVectorized(
                 broadcasted_acc = _tuple_broadcast_field(acc, (*non_scan_domain.dims, scan_axis))
                 _tuple_assign_field(res, broadcasted_acc, k_slice)
 
-        with device_ctx:
-            scan_loop()
+        scan_loop()
 
         return res
 
@@ -499,9 +497,9 @@ def field_operator_call(op: EmbeddedOperator[_R, _P], args: Any, kwargs: Any) ->
                 # traverse the Python loop natively; we don't need ``torch.compile``
                 # for correctness. The TorchCompileBackend (Phase E) is the
                 # opt-in performance path. Fresh allocations (scan buffers,
-                # 0-dim scalar tensors) follow the inputs' device.
-                with field_utils.device_context(*args, *kwargs.values()):
-                    return op(*args, **kwargs)
+                # 0-dim scalar tensors) are placed on the inputs' device
+                # explicitly (field_utils.device_of); no torch.device mode.
+                return op(*args, **kwargs)
             # Plain NumPy or any other namespace: run eagerly.
             return op(*args, **kwargs)
 
