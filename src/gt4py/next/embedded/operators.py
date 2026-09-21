@@ -7,6 +7,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import dataclasses
+import os
 from types import ModuleType
 from typing import Any, Callable, Generic, Optional, ParamSpec, Sequence, TypeVar
 
@@ -386,18 +387,33 @@ class ScanOperatorJax(EmbeddedOperator[xtyping.MaybeNestedInTuple[core_defs.Scal
         return utils.tree_map(lambda a: _to_numpy_field(a))(res)
 
 
-# PyTorch eager scan: the body iterates the K range with a Python for-loop,
-# horizontal slice per K. Functionally identical to ScanOperatorVectorized;
-# the alias exists so ``strategy="torch"`` reads naturally and we have a
-# documented hook point for future torch-specific variants (e.g. wrapping
-# the loop in ``torch.compile``).
-#
-# torch.autograd / torch.func.{jvp,vjp} traverse the Python loop natively;
-# no torch.lax.scan equivalent is needed. ``torch._higher_order_ops.scan``
-# does exist (PyTorch >= 2.5) but is forward-only — it fails under
-# torch.func.{jvp,vjp} with a TorchDynamo functorch-unwrap error. See
-# docs/pytorch-embedded-plan.md for details.
-ScanOperatorTorch = ScanOperatorVectorized
+@dataclasses.dataclass(frozen=True)
+class ScanOperatorTorch(ScanOperatorVectorized):
+    """PyTorch scan.
+
+    ``GT4PY_TORCH_SCAN=eager`` (default): the plain Python K loop of
+    ``ScanOperatorVectorized``. ``trace`` / ``compile``: traced (and
+    Inductor-compiled) scan bodies with explicit JVP / VJP rules, see
+    :mod:`gt4py.next.embedded.torch_scan`.
+    """
+
+    def __call__(  # type: ignore[override]
+        self,
+        *args: common.Field | core_defs.Scalar,
+        **kwargs: common.Field | core_defs.Scalar,
+    ) -> (
+        common.Field[Any, core_defs.ScalarT]
+        | tuple[common.Field[Any, core_defs.ScalarT] | tuple, ...]
+    ):
+        mode = os.environ.get("GT4PY_TORCH_SCAN", "eager")
+        xp = get_array_ns(*(arguments.extract(arg) for arg in (*args, *kwargs.values())))
+        if mode == "eager" or torch is None or xp is not torch:
+            return super().__call__(*args, **kwargs)
+        from gt4py.next.embedded import torch_scan
+
+        return torch_scan.scan_call(self, args, kwargs, mode, xp)
+
+
 # ``FieldOperator.__call__`` constructs a new ``EmbeddedOperator`` for every
 # call, so a plain ``jax.jit(op)`` in ``field_operator_call`` would start
 # from an empty dispatch cache each time: the operator was re-traced and
