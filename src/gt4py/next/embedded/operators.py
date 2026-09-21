@@ -203,7 +203,10 @@ class ScanOperatorVectorized(
         xp = get_array_ns(*(arguments.extract(arg) for arg in all_args))
         init_type = _weak_init_type(self.init, all_args)
         assert isinstance(init_type, ts.TupleType | ts.ScalarType | ts.NamedCollectionType)
-        res = field_utils.field_from_typespec(init_type, out_domain, xp)
+        # Allocate result / accumulator on the device of the inputs (torch).
+        device_ctx = field_utils.device_context(*all_args)
+        with device_ctx:
+            res = field_utils.field_from_typespec(init_type, out_domain, xp)
 
         def scan_loop() -> None:
             acc: common.MutableField | tuple[common.MutableField | tuple, ...] = (
@@ -225,7 +228,8 @@ class ScanOperatorVectorized(
                 broadcasted_acc = _tuple_broadcast_field(acc, (*non_scan_domain.dims, scan_axis))
                 _tuple_assign_field(res, broadcasted_acc, k_slice)
 
-        scan_loop()
+        with device_ctx:
+            scan_loop()
 
         return res
 
@@ -465,8 +469,10 @@ def field_operator_call(op: EmbeddedOperator[_R, _P], args: Any, kwargs: Any) ->
                 # Torch inputs: run eagerly. ``torch.autograd`` / ``torch.func``
                 # traverse the Python loop natively; we don't need ``torch.compile``
                 # for correctness. The TorchCompileBackend (Phase E) is the
-                # opt-in performance path.
-                return op(*args, **kwargs)
+                # opt-in performance path. Fresh allocations (scan buffers,
+                # 0-dim scalar tensors) follow the inputs' device.
+                with field_utils.device_context(*args, *kwargs.values()):
+                    return op(*args, **kwargs)
             # Plain NumPy or any other namespace: run eagerly.
             return op(*args, **kwargs)
 

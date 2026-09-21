@@ -6,6 +6,7 @@
 # Please, refer to the LICENSE file in the root directory.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import contextlib
 from types import ModuleType
 
 import numpy as np
@@ -102,6 +103,28 @@ def get_array_ns(
         if hasattr(arg, "array_ns"):
             return arg.array_ns
     return np
+
+
+def device_context(
+    *args: core_defs.Scalar | common.Field | tuple[core_defs.Scalar | common.Field | tuple, ...],
+) -> contextlib.AbstractContextManager:
+    """Context under which fresh arrays are allocated on the device of ``args``.
+
+    ``torch.empty`` & co. allocate on torch's *default* device (CPU), not
+    on the device of the tensors an operator receives, so embedded execution
+    on GPU-resident torch inputs would mix CUDA and CPU tensors (e.g. the
+    scan accumulator from :func:`field_from_typespec`). Entering the
+    ``torch.device`` of the first torch-backed field makes all factory
+    calls follow the inputs. Other array namespaces (numpy, cupy, jax)
+    already allocate where their inputs live; for those (and if no torch
+    field is present) this is a no-op.
+    """
+    if torch is not None:
+        for arg in utils.flatten_nested_tuple(args):
+            data = getattr(arg, "ndarray", None)
+            if isinstance(data, torch.Tensor):
+                return torch.device(data.device)
+    return contextlib.nullcontext()
 
 
 def verify_device_field_type(field: common.Field, device: core_defs.DeviceType) -> bool:
