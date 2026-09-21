@@ -280,6 +280,13 @@ def _broadcast_to(f, domain):
     return type(f)(domain, xp.broadcast_to(f.ndarray, domain.shape))
 
 
+def _jax_scan_unroll() -> int | bool:
+    import os
+
+    value = os.environ.get("GT4PY_JAX_SCAN_UNROLL", "1")
+    return True if value == "all" else int(value)
+
+
 @dataclasses.dataclass(frozen=True)
 class ScanOperatorJax(EmbeddedOperator[xtyping.MaybeNestedInTuple[core_defs.ScalarT], _P]):
     """Scan operator emitting a single ``jax.lax.scan``.
@@ -362,7 +369,12 @@ class ScanOperatorJax(EmbeddedOperator[xtyping.MaybeNestedInTuple[core_defs.Scal
 
             init = field_utils.field_from_typespec(init_type, non_scan_domain, jnp)
             _tuple_assign_field(target=init, source=self.init, domain=non_scan_domain)
-            res = lax.scan(jax_fun, init, new_args_seq, reverse=not self.forward)
+            # GT4PY_JAX_SCAN_UNROLL=<n|all>: unroll the XLA loop body n times
+            # (or fully) so XLA can fuse across levels; the rolled loop is
+            # launch-bound on GPUs for small horizontal sizes. Default 1.
+            res = lax.scan(
+                jax_fun, init, new_args_seq, reverse=not self.forward, unroll=_jax_scan_unroll()
+            )
             res = res[1]
             res = utils.tree_map(
                 lambda f: nd_array_field.JaxArrayField(
@@ -388,6 +400,23 @@ class ScanOperatorJax(EmbeddedOperator[xtyping.MaybeNestedInTuple[core_defs.Scal
 # torch.func.{jvp,vjp} with a TorchDynamo functorch-unwrap error. See
 # docs/pytorch-embedded-plan.md for details.
 ScanOperatorTorch = ScanOperatorVectorized
+# ``FieldOperator.__call__`` constructs a new ``EmbeddedOperator`` for every
+# call, so a plain ``jax.jit(op)`` in ``field_operator_call`` would start
+# from an empty dispatch cache each time: the operator was re-traced and
+# re-compiled on every invocation (measured: 7 XLA compilations per call of
+# the CLOUDSC2 stencil). ``EmbeddedOperator`` is a frozen dataclass, so
+# operators built from the same definition compare and hash equal and can
+# key one persistent jitted callable. Shapes / dtypes / domains still take
+# part in JAX's own cache key, so a shape change re-traces as usual.
+_JAX_JIT_CACHE: dict[EmbeddedOperator, Callable] = {}
+
+
+def _jax_jitted(op: EmbeddedOperator) -> Callable:
+    try:
+        return _JAX_JIT_CACHE[op]
+    except KeyError:
+        assert jax is not None
+        return _JAX_JIT_CACHE.setdefault(op, jax.jit(op))
 
 
 def _get_out_domain(out: xtyping.MaybeNestedInTuple[common.MutableField]) -> common.Domain:
@@ -455,7 +484,7 @@ def field_operator_call(op: EmbeddedOperator[_R, _P], args: Any, kwargs: Any) ->
         # is determined by the input fields' array_ns, not by what's importable
         # — this lets JAX and torch coexist in the same gt4py install with the
         # cloudsc2 driver pinning the namespace per call.
-        input_ns = get_array_ns(*(arguments.extract(a) for a in args))
+        input_ns = get_array_ns(*(arguments.extract(a) for a in (*args, *kwargs.values())))
 
         def _run():
             if jax is not None and jax.numpy is input_ns:
@@ -464,7 +493,7 @@ def field_operator_call(op: EmbeddedOperator[_R, _P], args: Any, kwargs: Any) ->
                 # tracing/fusion. Makes ``jax.jit`` / ``jax.jvp`` / ``jax.vjp``
                 # over a wrapper that invokes a gt4py field operator do
                 # something useful.
-                return jax.jit(op)(*args, **kwargs)
+                return _jax_jitted(op)(*args, **kwargs)
             if torch is not None and torch is input_ns:
                 # Torch inputs: run eagerly. ``torch.autograd`` / ``torch.func``
                 # traverse the Python loop natively; we don't need ``torch.compile``
