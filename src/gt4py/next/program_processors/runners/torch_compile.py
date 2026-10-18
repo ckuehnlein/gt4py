@@ -104,8 +104,11 @@ if torch:
             side.wait_stream(torch.cuda.current_stream())
             if mode == "grad":
                 sample = tuple(t.detach().clone().requires_grad_(t.requires_grad) for t in tensors)
+                # allow_unused_input: an input may not take part in the
+                # autograd graph (e.g. only read by a non-differentiable
+                # path); its gradient is then None, as with autograd.grad.
                 self.graphed = torch.cuda.make_graphed_callables(
-                    lambda *ts: tuple(run(list(ts))), sample
+                    lambda *ts: tuple(run(list(ts))), sample, allow_unused_input=True
                 )
                 return
             if mode == "dual":

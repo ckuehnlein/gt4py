@@ -130,12 +130,9 @@ def _inline_scalar_constants(gm: Any) -> Any:
 class _TorchScanBodies:
     """Traced (optionally compiled) fwd / jvp / vjp graphs of one scan body.
 
-    fwd and vjp are traced on construction. The jvp body is traced through
-    ``torch.func.jvp``, which opens a forward-AD dual level and cannot nest
-    inside one that is already active (a TL call under ``forward_ad`` /
-    ``torch.func.jvp`` before any plain call); it is therefore traced lazily
-    at the first opportunity without an active dual level. Until then the
-    JVP rule falls back to forward AD through the traced fwd graph.
+    All three are traced on construction: fwd directly, jvp with raw
+    forward AD at the current dual level (so tracing also works from inside
+    a TL call under ``forward_ad.dual_level()``), vjp with ``torch.func.vjp``.
     """
 
     def __init__(self, fun: Callable, samples: Sequence[Any], n_acc: int, mode: str) -> None:
@@ -146,16 +143,15 @@ class _TorchScanBodies:
         self.shapes = [(tuple(t.shape), t.dtype, t.device) for t in samples]
         self.float_in = [t.is_floating_point() for t in samples]
         self.compiled: dict[str, Callable] = {}
-        self.jvp: Optional[Callable] = None
         with self._trace_context():
             self.fwd = self._trace(self.fun, 1)
+            self.jvp = self._trace(self._jvp_fn, 2)
             self.vjp = self._trace(self._vjp_fn, 2, cots=True)
         if mode == "compile":
             # Compile eagerly so the one-time cost sits in the first call
             # rather than in whichever later call first needs a body.
-            self.get("fwd")
-            self.get("vjp")
-        self.try_trace_jvp()
+            for name in ("fwd", "jvp", "vjp"):
+                self.get(name)
 
     def _fresh(self) -> list:
         return [torch.zeros(sh, dtype=dt, device=dev) for sh, dt, dev in self.shapes]
@@ -191,17 +187,23 @@ class _TorchScanBodies:
         return full
 
     def _jvp_fn(self, *ts):
-        primals, tangents = list(ts[: self.n]), ts[self.n :]
+        # Raw forward AD at the current dual level (or a fresh one): unlike
+        # torch.func.jvp this also traces while the caller already runs
+        # under forward_ad.dual_level(), so no lazy trace / fallback is needed.
+        import torch.autograd.forward_ad as fwAD
 
-        def f_float(*fl):
-            outs = self.fun(*self._substitute(primals, fl))
-            return tuple(o for o in outs if o.is_floating_point()), outs
-
-        fp = tuple(p for p, f in zip(primals, self.float_in) if f)
-        ft = tuple(t for t, f in zip(tangents, self.float_in) if f)
-        _, tans, outs = torch.func.jvp(f_float, fp, ft, has_aux=True)
-        it = iter(tans)
-        return tuple(next(it) if o.is_floating_point() else torch.zeros_like(o) for o in outs)
+        primals, tangents = ts[: self.n], ts[self.n :]
+        level = contextlib.nullcontext() if fwAD._current_level >= 0 else fwAD.dual_level()
+        with level, fwAD._set_fwd_grad_enabled(True):
+            duals = [
+                fwAD.make_dual(p, t) if f else p for p, t, f in zip(primals, tangents, self.float_in)
+            ]
+            outs = self.fun(*duals)
+            res = []
+            for o in outs:
+                tan = fwAD.unpack_dual(o).tangent if o.is_floating_point() else None
+                res.append(torch.zeros_like(o) if tan is None else tan.clone())
+            return tuple(res)
 
     def _vjp_fn(self, *ts):
         primals, cots = list(ts[: self.n]), ts[self.n :]
@@ -218,31 +220,6 @@ class _TorchScanBodies:
             next(grads) if f else torch.zeros_like(p) for p, f in zip(primals, self.float_in)
         )
 
-    def try_trace_jvp(self) -> None:
-        import torch.autograd.forward_ad as fwAD
-
-        if self.jvp is not None or fwAD._current_level >= 0:
-            return
-        with self._trace_context():
-            self.jvp = self._trace(self._jvp_fn, 2)
-        if self.mode == "compile":
-            self.get("jvp")
-
-    def _jvp_via_fwd(self, *ts):
-        """JVP rule fallback: forward AD through the traced fwd graph at the current dual level."""
-        import torch.autograd.forward_ad as fwAD
-
-        primals, tangents = ts[: self.n], ts[self.n :]
-        duals = [
-            fwAD.make_dual(p, t) if p.is_floating_point() else p for p, t in zip(primals, tangents)
-        ]
-        outs = self.fwd(*duals)
-        res = []
-        for o in outs:
-            tan = fwAD.unpack_dual(o).tangent if o.is_floating_point() else None
-            res.append(torch.zeros_like(o) if tan is None else tan)
-        return tuple(res)
-
     def get(self, name: str, *tensors: Any) -> Callable:
         """Body ``name``: compiled when ``tensors`` are plain, traced otherwise.
 
@@ -253,9 +230,6 @@ class _TorchScanBodies:
         compiled ones.
         """
         graph = getattr(self, name)
-        if graph is None:
-            assert name == "jvp"
-            return self._jvp_via_fwd
         if self.mode == "compile" and not any(
             torch._C._functorch.is_functorch_wrapped_tensor(t) for t in tensors
         ):
@@ -516,8 +490,6 @@ def scan_call(op: Any, args: Sequence[Any], kwargs: dict, mode: str, xp: ModuleT
     bodies = _TORCH_SCAN_CACHE.get(key)
     if bodies is None:
         bodies = _TORCH_SCAN_CACHE[key] = _TorchScanBodies(body_tensors, samples, n_acc, mode)
-    else:
-        bodies.try_trace_jvp()
 
     order = list(range(len(scan_range.unit_range)))
     if not op.forward:
