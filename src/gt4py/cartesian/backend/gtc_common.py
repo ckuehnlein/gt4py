@@ -65,10 +65,10 @@ def pybuffer_to_sid(
 
 
 #: Identifiers the generated ``run_computation`` binding declares or uses by name inside its
-#: lambda: a stencil parameter of the same name would shadow them.
-BINDING_RESERVED_NAMES: Final[frozenset[str]] = frozenset(
-    {"gt_pyext_args", "gt_pyext_cast_arg", "gt", "py", "std"}
-)
+#: lambda: a stencil parameter of the same name would shadow them. The namespace aliases ``gt``,
+#: ``py`` and ``std`` need no reservation: the name before a ``::`` is looked up among namespaces
+#: and types only ([basic.lookup.qual]), so a parameter named ``py`` does not hide ``py::object``.
+BINDING_RESERVED_NAMES: Final[frozenset[str]] = frozenset({"gt_pyext_args", "gt_pyext_cast_arg"})
 
 def split_binding_params(params: Sequence[str]) -> list[tuple[str, str]]:
     """Split the C++ parameter declarations of ``run_computation`` into ``(type, name)`` pairs.
