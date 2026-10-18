@@ -9,9 +9,11 @@
 from __future__ import annotations
 
 import abc
+import keyword
 import os
 import textwrap
 import time
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Final
 
 from gt4py.cartesian import backend as gt_backend, config as gt_config, utils as gt_utils
@@ -62,10 +64,80 @@ def pybuffer_to_sid(
     return sid_def
 
 
+#: Identifiers the generated ``run_computation`` binding declares or uses by name inside its
+#: lambda: a stencil parameter of the same name would shadow them.
+BINDING_RESERVED_NAMES: Final[frozenset[str]] = frozenset(
+    {"gt_pyext_args", "gt_pyext_cast_arg", "gt", "py", "std"}
+)
+
+def split_binding_params(params: Sequence[str]) -> list[tuple[str, str]]:
+    """Split the C++ parameter declarations of ``run_computation`` into ``(type, name)`` pairs.
+
+    ``params`` are the declarations in call order; one string may declare several parameters
+    (a field is ``"py::buffer x, std::array<gt::int_t,N> x_origin"``). They are joined and split
+    at the commas outside ``<...>``; each parameter's name is its last whitespace-separated token
+    and must be a Python identifier that is not a keyword (``str.isidentifier``: the rule stencil
+    parameter names already follow, non-ASCII letters included; it admits no quote, backslash or
+    whitespace, so the name is safe inside the generated string literal). Anything that does not
+    parse, a duplicate name, or a name in :data:`BINDING_RESERVED_NAMES` raises ``ValueError``
+    quoting the parameter, at code-generation time.
+    """
+    text = ",".join(params)
+    pieces: list[str] = []
+    depth = 0
+    start = 0
+    for pos, char in enumerate(text):
+        if char == "<":
+            depth += 1
+        elif char == ">":
+            depth -= 1
+            if depth < 0:
+                raise ValueError(
+                    f"run_computation binding: unbalanced '>' in parameter {text[start:]!r}"
+                )
+        elif char == "," and depth == 0:
+            pieces.append(text[start:pos])
+            start = pos + 1
+    if depth != 0:
+        raise ValueError(f"run_computation binding: unbalanced '<' in parameter {text[start:]!r}")
+    pieces.append(text[start:])
+
+    result: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for piece in pieces:
+        param = piece.strip()
+        if not param:
+            raise ValueError(f"run_computation binding: empty parameter in {text!r}")
+        words = param.rsplit(None, 1)
+        if len(words) != 2 or not words[1].isidentifier() or keyword.iskeyword(words[1]):
+            raise ValueError(
+                f"run_computation binding: cannot parse parameter {param!r}"
+                " (expected '<C++ type> <identifier>')"
+            )
+        ctype, name = words[0].rstrip(), words[1]
+        if name in BINDING_RESERVED_NAMES:
+            raise ValueError(
+                f"run_computation binding: parameter {param!r} uses the reserved name {name!r}"
+            )
+        if name in seen:
+            raise ValueError(f"run_computation binding: duplicate parameter name {name!r}")
+        seen.add(name)
+        result.append((ctype, name))
+    return result
+
+
 def bindings_main_template():
     return codegen.MakoTemplate(
-        """
+        """<%!
+        from gt4py.cartesian.backend.gtc_common import split_binding_params
+        %><%
+        params = split_binding_params(
+            ["std::array<gt::uint_t, 3> domain", *entry_params, "py::object exec_info"]
+        )
+        %>
         #include <chrono>
+        #include <cstddef>
+        #include <string>
         #include <pybind11/pybind11.h>
         #include <pybind11/stl.h>
         #include <gridtools/storage/adapter/python_sid_adapter.hpp>
@@ -76,10 +148,34 @@ def bindings_main_template():
         #include "computation.hpp"
         namespace gt = gridtools;
         namespace py = ::pybind11;
+        namespace {
+        // Positional argument `index` of run_computation converted to T (pybind11's converting
+        // cast); a failed conversion raises TypeError naming the argument.
+        template <typename T>
+        T gt_pyext_cast_arg(const py::args &args, std::size_t index, const char *name) {
+            try {
+                return args[index].cast<T>();
+            } catch (const py::cast_error &) {
+            } catch (const py::type_error &) {
+            }
+            throw py::type_error("run_computation(): positional argument " + std::to_string(index)
+                + " ('" + name + "') cannot be converted from Python type '"
+                + Py_TYPE(args[index].ptr())->tp_name + "'");
+        }
+        }  // namespace
         PYBIND11_MODULE(${module_name}, m) {
-            m.def("run_computation", [](
-            ${','.join(["std::array<gt::uint_t, 3> domain", *entry_params, 'py::object exec_info'])}
-            ){
+            // The arguments arrive as py::args and are cast one by one: typed lambda parameters
+            // make pybind11 build the function signature at compile time, at a cost roughly
+            // quadratic in the parameter count (hundreds of parameters exhaust the compiler).
+            // GT4Py's generated Python wrapper calls run_computation positionally, in this order.
+            m.def("run_computation", [](py::args gt_pyext_args) {
+                if (gt_pyext_args.size() != ${len(params)}) {
+                    throw py::type_error("run_computation(): expected ${len(params)} positional arguments, got "
+                        + std::to_string(gt_pyext_args.size()));
+                }
+            % for index, (ctype, cname) in enumerate(params):
+                ${ctype} ${cname} = gt_pyext_cast_arg<${ctype}>(gt_pyext_args, ${index}, "${cname}");
+            % endfor
                 if (!exec_info.is(py::none()))
                 {
                     auto exec_info_dict = exec_info.cast<py::dict>();
