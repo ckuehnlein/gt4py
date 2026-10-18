@@ -15,21 +15,12 @@ import itertools
 import math
 from collections.abc import Callable, Sequence
 from types import ModuleType
+from typing import Any, ClassVar, Never, Optional, ParamSpec, TypeAlias, TypeVar, cast
 
 import numpy as np
 from numpy import typing as npt
 
 from gt4py._core import definitions as core_defs
-from gt4py.eve.extended_typing import (
-    Any,
-    ClassVar,
-    Never,
-    Optional,
-    ParamSpec,
-    TypeAlias,
-    TypeVar,
-    cast,
-)
 from gt4py.next import common
 from gt4py.next.embedded import (
     common as embedded_common,
@@ -1186,19 +1177,26 @@ if jnp:
 
     common._field.register(jnp.ndarray, JaxArrayField.from_array)
     common._connectivity.register(jnp.ndarray, JaxArrayConnectivityField.from_array)
-    # Under jax.jit, jnp arrays are replaced by Tracer subclasses that don't
-    # match `jnp.ndarray`. Register the Tracer base so embedded code paths
-    # going through `common._field(...)` continue to work inside traced
-    # computations.
+    # jax >= 0.11: 'Tracer' is no longer a subclass of 'jax.Array' (only 'isinstance' says so, via
+    # 'ArrayMeta.__instancecheck__'), and 'singledispatch' resolves on the class hierarchy.
     common._field.register(jax.core.Tracer, JaxArrayField.from_array)
+    common._connectivity.register(jax.core.Tracer, JaxArrayConnectivityField.from_array)
 
-    def _flatten(v: JaxArrayField):
-        return (v.ndarray,), v.domain
+    def _flatten_jax_field(
+        field: JaxArrayField,
+    ) -> tuple[tuple[core_defs.NDArrayObject], common.Domain]:
+        return (field.ndarray,), field.domain
 
-    def _unflatten(aux_data, children):
-        return JaxArrayField(aux_data, children[0])
+    def _unflatten_jax_field(
+        domain: common.Domain, children: tuple[core_defs.NDArrayObject]
+    ) -> JaxArrayField:
+        return JaxArrayField(domain, children[0])  # type: ignore[abstract] # mypy does not see '__gt_builtin_func__' as implemented by 'FieldBuiltinFuncRegistry'
 
-    jax.tree_util.register_pytree_node(JaxArrayField, _flatten, _unflatten)
+    jax.tree_util.register_pytree_node(
+        JaxArrayField,  # type: ignore[type-abstract, unused-ignore] # only reported when 'jax' is installed, see '_unflatten_jax_field'
+        _flatten_jax_field,
+        _unflatten_jax_field,
+    )
 
 
 # PyTorch

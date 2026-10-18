@@ -12,7 +12,7 @@ import types
 from gt4py.next import backend, common, constructors, utils
 from gt4py.next.embedded import operators as embedded_operators
 from gt4py.next.ffront import stages as ffront_stages
-from gt4py.next.otf import arguments, definitions, stages
+from gt4py.next.otf import arguments, artifacts, stages
 
 
 try:
@@ -242,8 +242,8 @@ if torch:
             object.__setattr__(self, "transforms", backend.DEFAULT_TRANSFORMS)
 
         def compile(
-            self, program: definitions.IRDefinitionT, compile_time_args: arguments.CompileTimeArgs
-        ) -> stages.ExecutableProgram:
+            self, program: stages.IRDefinitionT, compile_time_args: arguments.CompileTimeArgs
+        ) -> artifacts.ExecutableProgram:
             if not isinstance(program, ffront_stages.DSLFieldOperatorDef):
                 raise NotImplementedError(
                     f"TorchCompileBackend can only be used from DSLFieldOperatorDef, "
