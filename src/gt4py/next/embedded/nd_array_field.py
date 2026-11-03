@@ -120,9 +120,7 @@ def _make_builtin(
                     target_dtype = None
                     device = None
                     for prior_f in fields:
-                        if isinstance(prior_f, common.Field) and hasattr(
-                            prior_f.ndarray, "dtype"
-                        ):
+                        if isinstance(prior_f, common.Field) and hasattr(prior_f.ndarray, "dtype"):
                             dt = prior_f.ndarray.dtype
                             if device is None:
                                 device = prior_f.ndarray.device
@@ -1218,9 +1216,7 @@ if torch:
                     None,
                 )
                 if np_scalar is None:
-                    raise TypeError(
-                        f"torch dtype {tensor.dtype!r} has no gt4py scalar mapping"
-                    )
+                    raise TypeError(f"torch dtype {tensor.dtype!r} has no gt4py scalar mapping")
             assert issubclass(np_scalar, core_defs.SCALAR_TYPES)
             assert all(isinstance(d, common.Dimension) for d in domain.dims), domain
             assert len(domain) == tensor.ndim
