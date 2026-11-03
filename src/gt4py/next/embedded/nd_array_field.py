@@ -21,7 +21,7 @@ import numpy as np
 from numpy import typing as npt
 
 from gt4py._core import definitions as core_defs
-from gt4py.next import common
+from gt4py.next import common, field_utils
 from gt4py.next.embedded import (
     common as embedded_common,
     context as embedded_context,
@@ -887,18 +887,51 @@ def _stack_domains(*domains: common.Domain, dim: common.Dimension) -> common.Dom
     return domains[0].replace(dim, common.NamedRange(dim, common.UnitRange(dim_start, dim_stop)))
 
 
-def _concat(*fields: common.Field, dim: common.Dimension) -> common.Field:
+def _is_floating(dtype: Any) -> bool:
+    is_floating_point = getattr(dtype, "is_floating_point", None)  # torch.dtype
+    if is_floating_point is not None:
+        return bool(is_floating_point)
+    return np.dtype(dtype).kind in "fc"
+
+
+def _undefined_filler(reference: common.Field, dim: common.Dimension, start: int, stop: int):
+    """A NaN field like ``reference`` spanning ``[start, stop)`` along ``dim``."""
+    domain = common.Domain(
+        dims=reference.domain.dims,
+        ranges=tuple(
+            common.UnitRange(start, stop) if d == dim else r
+            for d, r in zip(reference.domain.dims, reference.domain.ranges)
+        ),
+    )
+    xp = reference.array_ns
+    with field_utils.device_context(reference):
+        data = xp.full(domain.shape, math.nan, dtype=reference.ndarray.dtype)
+    return reference.__class__.from_array(data, domain=domain)
+
+
+def _concat(*fields: common.Field, dim: common.Dimension, fill_gaps: bool = False) -> common.Field:
     # TODO(havogt): this function could be extended to a general concat
     # currently only concatenate along the given dimension
     sorted_fields = sorted(fields, key=lambda f: f.domain[dim].unit_range.start)
 
+    pieces: list[common.Field] = []
     for prev, curr in itertools.pairwise(sorted_fields):
         left = prev.domain[dim].unit_range.stop
         right = curr.domain[dim].unit_range.start
         if left > right:
             raise ValueError("Fields to concatenate must not overlap.")
+        pieces.append(prev)
         if left < right:
-            raise embedded_exceptions.NonContiguousDomain(f"Cannot concatenate fields along {dim}.")
+            if not (fill_gaps and _is_floating(prev.ndarray.dtype)):
+                raise embedded_exceptions.NonContiguousDomain(
+                    f"Cannot concatenate fields along {dim}."
+                )
+            # `concat_where` nests: the gap is undefined here and an enclosing
+            # `concat_where` is expected to cover it. A compiled backend never evaluates
+            # the inner branches there; embedded execution marks the points NaN instead.
+            pieces.append(_undefined_filler(prev, dim, left, right))
+    pieces.append(sorted_fields[-1])
+    sorted_fields = pieces
     new_domain = _stack_domains(*[f.domain for f in sorted_fields], dim=dim)
     nd_array_class = _get_nd_array_class(*sorted_fields)
     return nd_array_class.from_array(
@@ -988,7 +1021,7 @@ def _concat_where(
         # no data to concatenate, return an empty field
         nd_array_class = _get_nd_array_class(true_field, false_field)
         return _size0_field(nd_array_class, dims=t_broadcasted.domain.dims, dtype=true_field.dtype)
-    return _concat(*f_slices, *t_slices, dim=domain_dim)
+    return _concat(*f_slices, *t_slices, dim=domain_dim, fill_gaps=True)
 
 
 NdArrayField.register_builtin_func(experimental.concat_where, _concat_where)  # type: ignore[arg-type]

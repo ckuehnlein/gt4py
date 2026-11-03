@@ -1827,3 +1827,26 @@ def test_jax_traced_array_dispatch():
         return common._connectivity(arr, codomain=D0, domain=codomain).ndarray
 
     np.testing.assert_array_equal(jax.jit(make_connectivity)(offsets), offsets)
+
+
+def test_concat_where_nested_fills_gap(nd_array_implementation):
+    """The inner ``concat_where`` leaves a gap the outer one covers.
+
+    A compiled backend never evaluates the inner branches on the gap; embedded execution
+    marks the gap NaN (floating point only) so that the enclosing ``concat_where`` can
+    overwrite it instead of failing with ``NonContiguousDomain``.
+    """
+    inner_false = _make_field_or_scalar(
+        [0.0], nd_array_implementation=nd_array_implementation, domain=common.domain({D0: (0, 1)})
+    )
+    inner_true = _make_field_or_scalar(
+        [2.0], nd_array_implementation=nd_array_implementation, domain=common.domain({D0: (2, 3)})
+    )
+    outer_true = _make_field_or_scalar(
+        [1.0], nd_array_implementation=nd_array_implementation, domain=common.domain({D0: (1, 2)})
+    )
+    inner = nd_array_field._concat_where(D0 == 2, inner_true, inner_false)
+    assert inner.domain == common.domain({D0: (0, 3)})
+    assert np.isnan(inner.asnumpy()[1])
+    result = nd_array_field._concat_where(D0 == 1, outer_true, inner)
+    assert np.array_equal(result.asnumpy(), [0.0, 1.0, 2.0])
