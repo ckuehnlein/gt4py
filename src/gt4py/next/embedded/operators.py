@@ -422,15 +422,33 @@ class ScanOperatorTorch(ScanOperatorVectorized):
 # operators built from the same definition compare and hash equal and can
 # key one persistent jitted callable. Shapes / dtypes / domains still take
 # part in JAX's own cache key, so a shape change re-traces as usual.
-_JAX_JIT_CACHE: dict[EmbeddedOperator, Callable] = {}
+_JAX_JIT_CACHE: dict[tuple[EmbeddedOperator, tuple[int, ...], tuple[str, ...]], Callable] = {}
 
 
-def _jax_jitted(op: EmbeddedOperator) -> Callable:
+def _is_jax_static_arg(arg: Any) -> bool:
+    """Integer-like scalars and (nested) tuples of them are jit-static.
+
+    They index the grid (``concat_where(KDim == last_idx - 1, ...)``, bounds, flags) and
+    must stay Python values under tracing: as tracers they cannot be compared with a
+    dimension or steer control flow. Floats stay traced, so a change of e.g. ``dt`` does
+    not retrace.
+    """
+    if isinstance(arg, tuple):
+        return len(arg) > 0 and all(_is_jax_static_arg(a) for a in arg)
+    return isinstance(arg, (bool, int, np.bool_, np.integer))
+
+
+def _jax_jitted(op: EmbeddedOperator, args: Sequence[Any], kwargs: dict[str, Any]) -> Callable:
+    static_argnums = tuple(i for i, a in enumerate(args) if _is_jax_static_arg(a))
+    static_argnames = tuple(k for k, v in kwargs.items() if _is_jax_static_arg(v))
+    key = (op, static_argnums, static_argnames)
     try:
-        return _JAX_JIT_CACHE[op]
+        return _JAX_JIT_CACHE[key]
     except KeyError:
         assert jax is not None
-        return _JAX_JIT_CACHE.setdefault(op, jax.jit(op))
+        return _JAX_JIT_CACHE.setdefault(
+            key, jax.jit(op, static_argnums=static_argnums, static_argnames=static_argnames)
+        )
 
 
 def _get_out_domain(out: xtyping.MaybeNestedInTuple[common.MutableField]) -> common.Domain:
@@ -510,7 +528,7 @@ def field_operator_call(op: EmbeddedOperator[_R, _P], args: Any, kwargs: Any) ->
                 # tracing/fusion. Makes ``jax.jit`` / ``jax.jvp`` / ``jax.vjp``
                 # over a wrapper that invokes a gt4py field operator do
                 # something useful.
-                return _jax_jitted(op)(*args, **kwargs)
+                return _jax_jitted(op, args, kwargs)(*args, **kwargs)
             if torch is not None and torch is input_ns:
                 # Torch inputs: run eagerly. ``torch.autograd`` / ``torch.func``
                 # traverse the Python loop natively; we don't need ``torch.compile``
