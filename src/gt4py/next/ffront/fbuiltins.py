@@ -337,6 +337,11 @@ UNARY_MATH_NUMBER_BUILTIN_NAMES: Final = [*_UNARY_MATH_NUMBER_BUILTIN_IMPL.keys(
 
 
 try:
+    import jax
+except ImportError:
+    jax = None  # type: ignore[assignment]
+
+try:
     from scipy.special import gamma as _gamma  # dtype-preserving ufunc
 except ImportError:
 
@@ -377,23 +382,33 @@ _UNARY_MATH_FP_PREDICATE_BUILTIN_IMPL: Final = {
 UNARY_MATH_FP_PREDICATE_BUILTIN_NAMES: Final = [*_UNARY_MATH_FP_PREDICATE_BUILTIN_IMPL.keys()]
 
 
+def _jax_unary_math_builtin(name: str) -> Callable:
+    """The ``jax.numpy`` counterpart of a floating-point math builtin."""
+    import jax.numpy as jnp
+
+    if name == "gamma":
+        from jax.scipy.special import gamma
+
+        return gamma
+    return getattr(jnp, name)
+
+
 def _make_unary_math_builtin(name: str) -> BuiltInFunction:
     _math_builtin = (
         _UNARY_MATH_NUMBER_BUILTIN_IMPL
         | _UNARY_MATH_FP_BUILTIN_IMPL
         | _UNARY_MATH_FP_PREDICATE_BUILTIN_IMPL
     )[name]
+    has_jax_impl = name not in _UNARY_MATH_NUMBER_BUILTIN_IMPL
 
     def impl(value: common.Field | core_defs.ScalarT, /) -> common.Field | core_defs.ScalarT:
         # TODO(havogt): enable tests in `test_math_builtin_execution.py`
-        # Under jax.jit tracing the value can be a JAX tracer or a 0-dim jnp
-        # array, neither of which passes core_defs.is_scalar_type but both
-        # of which the underlying math builtin (or its jnp equivalent via
-        # dispatch) handles correctly.
-        # assert core_defs.is_scalar_type(
-        #     value
-        # )  # default implementation for scalars, Fields are handled via dispatch
-
+        # Default implementation for scalars, Fields are handled via dispatch. Under
+        # `jax.jit` tracing a scalar argument arrives as a JAX tracer, which the numpy
+        # ufuncs cannot evaluate (they would call `__array__` on it), so it goes to the
+        # `jax.numpy` counterpart.
+        if has_jax_impl and jax is not None and isinstance(value, jax.Array):
+            return _jax_unary_math_builtin(name)(value)
         return cast(common.Field | core_defs.ScalarT, _math_builtin(value))
 
     impl.__name__ = name
