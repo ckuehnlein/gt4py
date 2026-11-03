@@ -776,11 +776,28 @@ class TestDomainOrOperator:
         result = d1 | d2
         assert result == Domain(dims=(IDim,), ranges=(UnitRange(0, 8),))
 
-    def test_same_dim_disjoint_raises(self):
+    def test_same_dim_disjoint_is_union(self):
+        d1 = Domain(dims=(IDim,), ranges=(UnitRange(0, 3),))
+        d2 = Domain(dims=(IDim,), ranges=(UnitRange(5, 8),))
+        result = d2 | d1
+        assert isinstance(result, common.DomainUnion)
+        assert result.parts == (d1, d2)
+        assert result.dims == (IDim,)
+
+    def test_union_merges_touching_parts(self):
+        d1 = Domain(dims=(IDim,), ranges=(UnitRange(0, 3),))
+        d2 = Domain(dims=(IDim,), ranges=(UnitRange(5, 8),))
+        d3 = Domain(dims=(IDim,), ranges=(UnitRange(3, 5),))
+        assert (d1 | d2) | d3 == Domain(dims=(IDim,), ranges=(UnitRange(0, 8),))
+        assert d3 | (d1 | d2) == Domain(dims=(IDim,), ranges=(UnitRange(0, 8),))
+        d4 = Domain(dims=(IDim,), ranges=(UnitRange(10, 12),))
+        assert (d1 | d2) | d4 == common.DomainUnion(parts=(d1, d2, d4))
+
+    def test_union_intersection_raises(self):
         d1 = Domain(dims=(IDim,), ranges=(UnitRange(0, 3),))
         d2 = Domain(dims=(IDim,), ranges=(UnitRange(5, 8),))
         with pytest.raises(NotImplementedError):
-            d1 | d2
+            (d1 | d2) & Domain(dims=(JDim,), ranges=(UnitRange(0, 3),))
 
     def test_multidim_raises(self):
         d1 = Domain(dims=(IDim, JDim), ranges=(UnitRange(0, 3), UnitRange(0, 3)))

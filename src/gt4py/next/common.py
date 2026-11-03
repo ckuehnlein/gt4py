@@ -543,13 +543,16 @@ class Domain(Sequence[NamedRange[_Rng]], Generic[_Rng]):
         )
         return Domain(dims=broadcast_dims, ranges=intersected_ranges)
 
-    def __or__(self, other: Domain) -> Domain:
+    def __or__(self, other: Domain | DomainUnion) -> Domain | DomainUnion:
         """
-        Union of `Domain`s, currently limited to 1D overlapping or adjacent domains.
+        Union of `Domain`s, currently limited to 1D domains.
 
-        Raises `NotImplementedError` for multidimensional domains or disjoint 1D domains.
-        See ADR 22.
+        Overlapping or adjacent domains merge into one `Domain`; disjoint ones form a
+        `DomainUnion`, which `concat_where` treats as the nested application over its
+        parts. Raises `NotImplementedError` for multidimensional domains. See ADR 22.
         """
+        if isinstance(other, DomainUnion):
+            return other | self
         if self.ndim > 1 or other.ndim > 1:
             raise NotImplementedError(
                 "Union of multidimensional domains is not supported, see ADR 22."
@@ -568,10 +571,7 @@ class Domain(Sequence[NamedRange[_Rng]], Generic[_Rng]):
                 dims=(self.dims[0],),
                 ranges=(UnitRange(first.ranges[0].start, second.ranges[0].stop),),
             )
-        raise NotImplementedError(
-            f"Union of disjoint domains '{first}' and '{second}' is not supported. "
-            f"Use nested 'concat_where' to express non-contiguous conditions, see ADR 22."
-        )
+        return DomainUnion(parts=(first, second))
 
     @functools.cached_property
     def slice_at(self) -> utils.IndexerCallable[slice, Domain]:
@@ -658,6 +658,65 @@ class Domain(Sequence[NamedRange[_Rng]], Generic[_Rng]):
 
 
 FiniteDomain: TypeAlias = Domain[FiniteUnitRange]
+
+
+@dataclasses.dataclass(frozen=True)
+class DomainUnion:
+    """
+    Union of pairwise disjoint 1D `Domain`s over the same dimension, e.g. ``(K == 1) | (K == 5)``.
+
+    Produced by `Domain.__or__` when the operands do not touch, so that a condition such as
+    ``concat_where((K == 1) | (K == n - 1), a, b)`` is expressible: `concat_where` applies
+    it as the nested ``concat_where(K == 1, a, concat_where(K == n - 1, a, b))``. The
+    parts are kept sorted by their start, so the union is canonical and hashable.
+    """
+
+    parts: tuple[Domain, ...]
+
+    def __post_init__(self) -> None:
+        if len(self.parts) < 2 or any(p.ndim != 1 for p in self.parts):
+            raise ValueError("'DomainUnion' needs at least two 1D domains.")
+        if len({p.dims[0] for p in self.parts}) != 1:
+            raise ValueError("'DomainUnion' parts must share their dimension.")
+        starts = [p.ranges[0].start for p in self.parts]
+        if starts != sorted(starts):
+            object.__setattr__(
+                self, "parts", tuple(sorted(self.parts, key=lambda p: p.ranges[0].start))
+            )
+        for first, second in zip(self.parts[:-1], self.parts[1:]):
+            if first.ranges[0].stop >= second.ranges[0].start:
+                raise ValueError(f"'DomainUnion' parts '{first}' and '{second}' are not disjoint.")
+
+    @property
+    def ndim(self) -> int:
+        return 1
+
+    @property
+    def dims(self) -> tuple[Dimension, ...]:
+        return self.parts[0].dims
+
+    def __or__(self, other: Domain | DomainUnion) -> Domain | DomainUnion:
+        others = other.parts if isinstance(other, DomainUnion) else (other,)
+        parts = sorted((*self.parts, *others), key=lambda p: p.ranges[0].start)
+        merged = [parts[0]]
+        for part in parts[1:]:
+            candidate = merged[-1] | part  # merges touching parts, else a two-part union
+            if isinstance(candidate, Domain):
+                merged[-1] = candidate
+            else:
+                merged.append(part)
+        return merged[0] if len(merged) == 1 else DomainUnion(parts=tuple(merged))
+
+    def __ror__(self, other: Domain) -> Domain | DomainUnion:
+        return self | other
+
+    def __and__(self, other: Any) -> Never:
+        raise NotImplementedError(
+            "Intersecting a union of disjoint domains is not supported; combine the "
+            "conditions with nested 'concat_where' calls instead, see ADR 22."
+        )
+
+    __rand__ = __and__
 
 
 DomainLike: TypeAlias = (

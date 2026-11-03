@@ -950,10 +950,16 @@ def _size0_field(
 
 
 def _concat_where(
-    domain: common.Domain,
+    domain: common.Domain | common.DomainUnion,
     true_field: common.Field,
     false_field: common.Field,
 ) -> common.Field:
+    if isinstance(domain, common.DomainUnion):
+        # ``concat_where(d1 | d2, a, b)`` is ``concat_where(d1, a, concat_where(d2, a, b))``
+        result = false_field
+        for part in reversed(domain.parts):
+            result = _concat_where(part, true_field, result)
+        return result
     if domain.ndim != 1:
         raise NotImplementedError(
             "'concat_where': Can only concatenate fields with a 1-dimensional domain."
